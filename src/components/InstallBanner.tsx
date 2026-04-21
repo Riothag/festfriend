@@ -34,7 +34,7 @@ export default function InstallBanner() {
           <p className="font-bold mb-0.5">📲 Save Fest Friend to your home screen</p>
           {isIOS ? (
             <p className="text-black/80">
-              In Safari, tap <span className="font-semibold">Share</span> then <span className="font-semibold">Add to Home Screen</span>.
+              In Safari or Chrome, tap <span className="font-semibold">Share</span> then <span className="font-semibold">Add to Home Screen</span>.
             </p>
           ) : (
             <p className="text-black/80">
