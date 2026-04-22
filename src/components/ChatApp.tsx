@@ -99,7 +99,16 @@ export default function ChatApp() {
         <div ref={scrollRef} />
       </div>
 
-      {empty && <QuickActions onSelect={send} />}
+      {empty && (
+        <QuickActions
+          onPrompt={(prompt) =>
+            setMessages((m) => [
+              ...m,
+              { id: `a-${Date.now()}`, role: "assistant", text: prompt },
+            ])
+          }
+        />
+      )}
 
       <div className="border-t border-gray-900 bg-black px-4 py-3 pb-[max(env(safe-area-inset-bottom),0.75rem)]">
         <ChatInput onSend={send} disabled={loading} />

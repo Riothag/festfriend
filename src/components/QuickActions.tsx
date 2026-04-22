@@ -1,19 +1,19 @@
 "use client";
 
-const BUTTONS: { label: string; query: string }[] = [
-  { label: "Who's playing now", query: "who's playing now" },
-  { label: "Find food", query: "where is crawfish bread" },
-  { label: "Artist info", query: "tell me about Trombone Shorty" },
-  { label: "Stage schedule", query: "stage schedule for Festival Stage" },
+const BUTTONS: { label: string; prompt: string }[] = [
+  { label: "Who's playing now", prompt: "Which stage are you near?" },
+  { label: "Find food", prompt: "What kind of food are you hungry for?" },
+  { label: "Artist info", prompt: "Which artist do you want to know about?" },
+  { label: "Stage schedule", prompt: "Which stage's schedule do you want?" },
 ];
 
-export default function QuickActions({ onSelect }: { onSelect: (query: string) => void }) {
+export default function QuickActions({ onPrompt }: { onPrompt: (prompt: string) => void }) {
   return (
     <div className="grid grid-cols-2 gap-2 px-4 pb-3">
       {BUTTONS.map((b) => (
         <button
           key={b.label}
-          onClick={() => onSelect(b.query)}
+          onClick={() => onPrompt(b.prompt)}
           className="rounded-xl border border-gray-800 bg-gray-950 text-white text-sm font-medium py-3 px-3 active:bg-gray-900"
         >
           {b.label}
