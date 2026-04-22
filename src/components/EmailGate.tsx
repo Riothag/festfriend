@@ -53,34 +53,47 @@ export default function EmailGate({ onUnlock }: { onUnlock: (email: string) => v
         </ul>
       </div>
 
-      <form onSubmit={submit} className="w-full max-w-md mx-auto space-y-3 pb-6">
-        {error && (
-          <div className="rounded-md bg-red-900/40 border border-red-700 text-red-200 text-sm p-3">
-            {error}
-          </div>
-        )}
-        <input
-          type="email"
-          inputMode="email"
-          autoComplete="email"
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-          placeholder="your@email.com"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          disabled={loading}
-          required
-          className="w-full rounded-full bg-gray-900 border border-gray-800 px-5 py-4 text-base text-white placeholder:text-gray-500 focus:outline-none focus:border-yellow-400 disabled:opacity-60"
-        />
-        <button
-          type="submit"
-          disabled={loading || !email.trim()}
-          className="w-full rounded-full bg-yellow-400 text-black text-lg font-bold py-4 active:scale-[0.99] disabled:opacity-60"
-        >
-          {loading ? "One sec…" : "Get started"}
-        </button>
-      </form>
+      <div className="w-full max-w-md mx-auto">
+        <form onSubmit={submit} className="space-y-3">
+          {error && (
+            <div className="rounded-md bg-red-900/40 border border-red-700 text-red-200 text-sm p-3">
+              {error}
+            </div>
+          )}
+          <input
+            type="email"
+            inputMode="email"
+            autoComplete="email"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            placeholder="your@email.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            disabled={loading}
+            required
+            className="w-full rounded-full bg-gray-900 border border-gray-800 px-5 py-4 text-base text-white placeholder:text-gray-500 focus:outline-none focus:border-yellow-400 disabled:opacity-60"
+          />
+          <button
+            type="submit"
+            disabled={loading || !email.trim()}
+            className="w-full rounded-full bg-yellow-400 text-black text-lg font-bold py-4 active:scale-[0.99] disabled:opacity-60"
+          >
+            {loading ? "One sec…" : "Get started"}
+          </button>
+        </form>
+        <p className="mt-6 text-center text-xs text-gray-500">
+          Made with ❤️ from Lisa LaCour at{" "}
+          <a
+            href="https://thevaultcollective.co"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:text-gray-300"
+          >
+            The Vault Collective
+          </a>
+        </p>
+      </div>
     </div>
   );
 }

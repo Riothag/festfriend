@@ -103,6 +103,17 @@ export default function ChatApp() {
 
       <div className="border-t border-gray-900 bg-black px-4 py-3 pb-[max(env(safe-area-inset-bottom),0.75rem)]">
         <ChatInput onSend={send} disabled={loading} />
+        <p className="mt-2 text-center text-[10px] text-gray-600">
+          Made with ❤️ from Lisa LaCour at{" "}
+          <a
+            href="https://thevaultcollective.co"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:text-gray-400"
+          >
+            The Vault Collective
+          </a>
+        </p>
       </div>
     </div>
   );
