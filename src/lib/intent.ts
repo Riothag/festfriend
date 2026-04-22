@@ -153,26 +153,18 @@ function findStage(query: string): Stage | null {
   return null;
 }
 
-// Today's date in YYYY-MM-DD form, in the festival's timezone. Used for
-// resolving "this friday" / "coming saturday" to the nearest upcoming option.
-function todayFestivalDate(now: Date = new Date()): string {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: festivalTimezone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(now);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
-  return `${get("year")}-${get("month")}-${get("day")}`;
-}
-
-// Pick the nearest upcoming day from a set. If all options are in the past,
-// pick the last one. Used for "this friday" disambiguation.
-function pickUpcoming(options: FestivalDay[]): FestivalDay {
-  const today = todayFestivalDate();
-  const upcoming = festivalDays.filter((d) => options.includes(d.day) && d.date >= today);
-  if (upcoming.length > 0) return upcoming[0].day;
-  return options[options.length - 1];
+// Standard "which day?" prompt, used whenever findDays returns multiple
+// options and the caller needs the user to pin it down.
+function whichDayPrompt(days: FestivalDay[], originalQuery: string): { response: string; pending: PendingDisambiguation } {
+  return {
+    response: [
+      `Which day?`,
+      ...days.map((d) => `• ${d}`),
+      ``,
+      `Reply with "23" / "30", "first" / "second", or the full date.`,
+    ].join("\n"),
+    pending: { kind: "day", options: days, originalQuery },
+  };
 }
 
 // Resolve a query to one or more festival days. Empty array if no day reference.
@@ -197,16 +189,23 @@ function findDays(query: string): FestivalDay[] {
 
   const days = byWeekday(weekday);
   if (days.length <= 1) return days;
-  if (has("first") || has("1st") || has("weekend 1") || has("apr") || has("april") || has("opening")) {
+  // Only auto-pick a weekend when the user is explicit. Bare weekdays,
+  // relative-time words ("this/next/coming"), and ambiguous words like
+  // "last", "opening", "closing" return both options so the caller can ask.
+  // Explicit selectors:
+  //   - "first sunday" / "second friday" / "1st" / "2nd"
+  //   - "weekend 1" / "weekend 2"
+  //   - "opening weekend" / "closing weekend" (or paired with a weekday)
+  //   - month references ("april" / "may")
+  const firstSelector = /\b(first|1st)\s+(weekend|thursday|thu|friday|fri|saturday|sat|sunday|sun)\b/.test(q);
+  const secondSelector = /\b(second|2nd)\s+(weekend|thursday|thu|friday|fri|saturday|sat|sunday|sun)\b/.test(q);
+  const openingWeekend = /\bopening\s+(weekend|thursday|thu|friday|fri|saturday|sat|sunday|sun)\b/.test(q);
+  const closingWeekend = /\bclosing\s+(weekend|thursday|thu|friday|fri|saturday|sat|sunday|sun)\b/.test(q);
+  if (firstSelector || has("weekend 1") || has("apr") || has("april") || openingWeekend) {
     return [days[0]];
   }
-  if (has("second") || has("2nd") || has("weekend 2") || has("may") || has("closing") || has("last")) {
+  if (secondSelector || has("weekend 2") || has("may") || closingWeekend) {
     return [days[days.length - 1]];
-  }
-  // "this friday" / "coming friday" / "upcoming friday" / "nearest" →
-  // use today's date to pick the nearest upcoming option.
-  if (has("this") || has("coming") || has("upcoming") || has("nearest") || has("next")) {
-    return [pickUpcoming(days)];
   }
   return days;
 }
@@ -676,18 +675,16 @@ export function handleArtistBio(query: string): { response: string; resolvedArti
   };
 }
 
-export function handleStageLookup(query: string): string {
+export function handleStageLookup(query: string): { response: string; pending?: PendingDisambiguation } {
   const s = findStage(query);
-  if (!s) return `No stage matches "${query}". Try: ${stages.map((x) => x.stage_name).join(", ")}.`;
+  if (!s) return { response: `No stage matches "${query}". Try: ${stages.map((x) => x.stage_name).join(", ")}.` };
   const days = findDays(query);
+  if (days.length > 1) return whichDayPrompt(days, query);
   let sets = artists.filter((a) => a.stage === s.stage_name);
   let dayContext = "";
-  if (days.length > 0) {
-    sets = sets.filter((a) => days.includes(a.day));
-    dayContext =
-      days.length === 1
-        ? ` — ${days[0]}`
-        : ` — ${days.join(" / ")}`;
+  if (days.length === 1) {
+    sets = sets.filter((a) => a.day === days[0]);
+    dayContext = ` — ${days[0]}`;
   }
   sets = sets.sort((a, b) => {
     const byDay = festivalDayIndex(a.day) - festivalDayIndex(b.day);
@@ -695,9 +692,9 @@ export function handleStageLookup(query: string): string {
     return toMinutes(a.start_time) - toMinutes(b.start_time);
   });
   if (sets.length === 0) {
-    return `${s.stage_name}${dayContext}\n${s.description}\n\nNo sets in the current data.`;
+    return { response: `${s.stage_name}${dayContext}\n${s.description}\n\nNo sets in the current data.` };
   }
-  return [`${s.stage_name}${dayContext}`, s.description, "", ...sets.map(artistLine)].join("\n");
+  return { response: [`${s.stage_name}${dayContext}`, s.description, "", ...sets.map(artistLine)].join("\n") };
 }
 
 export function handleNowPlaying(): string {
@@ -849,21 +846,19 @@ export function handleDayLookup(query: string): { response: string; pending?: Pe
   };
 }
 
-export function handleGenreLookup(query: string): string {
+export function handleGenreLookup(query: string): { response: string; pending?: PendingDisambiguation } {
   const genres = findGenres(query);
   if (genres.length === 0) {
-    return "Tell me a genre. Try: \"any funk Saturday\" or \"show me blues acts\".";
+    return { response: "Tell me a genre. Try: \"any funk Saturday\" or \"show me blues acts\"." };
   }
   const days = findDays(query);
+  if (days.length > 1) return whichDayPrompt(days, query);
   let pool = artists.filter((a) => matchesAnyGenre(a, genres));
   let dayContext = "";
 
-  if (days.length > 0) {
-    pool = pool.filter((a) => days.includes(a.day));
-    dayContext =
-      days.length === 1
-        ? ` on ${days[0]}`
-        : ` on ${days.join(" / ")}`;
+  if (days.length === 1) {
+    pool = pool.filter((a) => a.day === days[0]);
+    dayContext = ` on ${days[0]}`;
   }
   const sorted = pool.sort((a, b) => {
     const byDay = festivalDayIndex(a.day) - festivalDayIndex(b.day);
@@ -871,8 +866,8 @@ export function handleGenreLookup(query: string): string {
     return toMinutes(a.start_time) - toMinutes(b.start_time);
   });
   const label = genres.map((g) => g.charAt(0).toUpperCase() + g.slice(1)).join(" / ");
-  if (sorted.length === 0) return `No ${label} acts${dayContext}.`;
-  return [`${label} acts${dayContext}:`, ...sorted.map(artistLine)].join("\n");
+  if (sorted.length === 0) return { response: `No ${label} acts${dayContext}.` };
+  return { response: [`${label} acts${dayContext}:`, ...sorted.map(artistLine)].join("\n") };
 }
 
 export function handleTimeWindow(query: string): { response: string; pending?: PendingDisambiguation } {
@@ -974,7 +969,7 @@ function scoreDemo(query: string, demo: Demo): number {
   return score;
 }
 
-export function handleCulturalLookup(query: string): string {
+export function handleCulturalLookup(query: string): { response: string; pending?: PendingDisambiguation } {
   const q = norm(query);
 
   // If the query mentions a specific area, filter to that area's entries.
@@ -993,12 +988,11 @@ export function handleCulturalLookup(query: string): string {
 
   // Optional day/weekend filter
   const days = findDays(query);
-  if (days.length > 0) {
-    // Map festival days to weekend 1 or 2.
+  if (days.length > 1) return whichDayPrompt(days, query);
+  if (days.length === 1) {
     const W1 = new Set<string>(["Thu Apr 23", "Fri Apr 24", "Sat Apr 25", "Sun Apr 26"]);
-    const wantedWeekends = new Set<string>();
-    for (const d of days) wantedWeekends.add(W1.has(d) ? "1" : "2");
-    pool = pool.filter((d) => d.weekend === "both" || wantedWeekends.has(d.weekend));
+    const weekend = W1.has(days[0]) ? "1" : "2";
+    pool = pool.filter((d) => d.weekend === "both" || d.weekend === weekend);
   }
 
   // If the query is still broad, rank by relevance to the full query and trim.
@@ -1008,13 +1002,15 @@ export function handleCulturalLookup(query: string): string {
     .sort((a, b) => b.score - a.score);
 
   if (scored.length === 0) {
-    return [
-      "I didn't find a cultural program matching that. Try:",
-      "• \"What's in the Cultural Exchange Pavilion?\"",
-      "• \"Folklife Village Saturday\"",
-      "• \"Jamaica artists\"",
-      "• \"Exhibits\"",
-    ].join("\n");
+    return {
+      response: [
+        "I didn't find a cultural program matching that. Try:",
+        "• \"What's in the Cultural Exchange Pavilion?\"",
+        "• \"Folklife Village Saturday\"",
+        "• \"Jamaica artists\"",
+        "• \"Exhibits\"",
+      ].join("\n"),
+    };
   }
 
   // Group by area / sub_area for a cleaner list.
@@ -1035,7 +1031,7 @@ export function handleCulturalLookup(query: string): string {
     return `• ${d.name}${tag} — ${wk}\n  ${d.description}`;
   });
   const more = scored.length > 12 ? `\n\n…and ${scored.length - 12} more. Narrow the query to see them.` : "";
-  return [`${header}:`, "", ...show].join("\n") + more;
+  return { response: [`${header}:`, "", ...show].join("\n") + more };
 }
 
 // ---- FAQ ----
@@ -1213,7 +1209,7 @@ export function answer(query: string, context?: AnswerContext): AnswerResult {
     case "now_playing":
       return { intent, response: handleNowPlaying() };
     case "stage_lookup":
-      return { intent, response: handleStageLookup(trimmed) };
+      return { intent, ...handleStageLookup(trimmed) };
     case "artist_bio":
       return { intent, ...handleArtistBio(trimmed) };
     case "artist_lookup":
@@ -1227,13 +1223,13 @@ export function answer(query: string, context?: AnswerContext): AnswerResult {
     case "prev_on_stage":
       return { intent, ...handlePrevOnStage(trimmed, context) };
     case "genre_lookup":
-      return { intent, response: handleGenreLookup(trimmed) };
+      return { intent, ...handleGenreLookup(trimmed) };
     case "time_window":
       return { intent, ...handleTimeWindow(trimmed) };
     case "conflict_lookup":
       return { intent, ...handleConflictLookup(trimmed, context) };
     case "cultural_lookup":
-      return { intent, response: handleCulturalLookup(trimmed) };
+      return { intent, ...handleCulturalLookup(trimmed) };
     case "faq_lookup":
       return { intent, response: handleFaqLookup(trimmed) };
     case "headliner_lookup":
