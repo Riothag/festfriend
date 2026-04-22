@@ -4,9 +4,8 @@ import { useEffect, useState } from "react";
 
 const DISMISS_KEY = "fest-friend-install-dismissed";
 
-export default function InstallBanner() {
-  const [show, setShow] = useState(false);
-  const [isIOS, setIsIOS] = useState(false);
+export default function InstallBanner({ active }: { active: boolean }) {
+  const [eligible, setEligible] = useState(false);
 
   useEffect(() => {
     if (localStorage.getItem(DISMISS_KEY) === "true") return;
@@ -16,31 +15,24 @@ export default function InstallBanner() {
       (window.navigator as Navigator & { standalone?: boolean }).standalone === true;
     if (isStandalone) return;
 
-    setIsIOS(/iPad|iPhone|iPod/.test(window.navigator.userAgent));
-    setShow(true);
+    setEligible(true);
   }, []);
 
   const dismiss = () => {
     localStorage.setItem(DISMISS_KEY, "true");
-    setShow(false);
+    setEligible(false);
   };
 
-  if (!show) return null;
+  if (!eligible || !active) return null;
 
   return (
     <div className="bg-yellow-400 text-black px-4 py-3 text-sm">
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1">
           <p className="font-bold mb-0.5">📲 Save Fest Friend to your home screen</p>
-          {isIOS ? (
-            <p className="text-black/80">
-              In Safari or Chrome, tap <span className="font-semibold">Share</span> then <span className="font-semibold">Add to Home Screen</span>.
-            </p>
-          ) : (
-            <p className="text-black/80">
-              In Chrome, tap the menu (⋮) then <span className="font-semibold">Add to Home screen</span>.
-            </p>
-          )}
+          <p className="text-black/80">
+            Tap the <span className="font-semibold">share button</span> at the top of your browser, then tap <span className="font-semibold">View more</span>, then <span className="font-semibold">Add to home screen</span>.
+          </p>
         </div>
         <button
           onClick={dismiss}

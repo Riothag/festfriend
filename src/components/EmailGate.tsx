@@ -39,18 +39,19 @@ export default function EmailGate({ onUnlock }: { onUnlock: (email: string) => v
 
   return (
     <div className="flex min-h-[100svh] w-full flex-col items-center justify-between bg-black text-white px-6 py-10">
-      <div className="w-full max-w-md mx-auto flex flex-col items-center pt-12 text-center">
-        <div className="text-6xl mb-4" aria-hidden>🎷</div>
-        <h1 className="text-5xl font-extrabold tracking-tight">Fest Friend</h1>
-        <p className="mt-4 text-lg text-gray-300">
-          Your pocket guide to Jazz Fest.
+      <div className="w-full max-w-md mx-auto flex flex-col pt-12 text-left">
+        <p className="text-sm font-bold tracking-[0.2em] text-yellow-400 uppercase">
+          Jazz Fest 2026
         </p>
-        <ul className="mt-8 text-left space-y-2 text-base text-gray-200">
-          <li>• What time does your band play?</li>
-          <li>• Who&apos;s on stage right now?</li>
-          <li>• Where to find crawfish bread.</li>
-          <li>• Quick band bios.</li>
-        </ul>
+        <h1 className="mt-4 text-5xl font-extrabold tracking-tight leading-[1.05]">
+          The fest in{" "}
+          <span className="italic font-serif text-yellow-400">your pocket.</span>
+        </h1>
+        <p className="mt-6 text-lg text-gray-300">
+          Schedules, stages, food, and artists.
+          <br />
+          <span className="text-white font-semibold">Ask like you&apos;re texting a local.</span>
+        </p>
       </div>
 
       <div className="w-full max-w-md mx-auto">
