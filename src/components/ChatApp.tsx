@@ -6,6 +6,7 @@ import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
 import QuickActions from "./QuickActions";
 import InstallBanner from "./InstallBanner";
+import FilterBar from "./FilterBar";
 
 export default function ChatApp() {
   const [messages, setMessages] = useState<TChatMessage[]>([]);
@@ -76,6 +77,8 @@ export default function ChatApp() {
 
       <InstallBanner active={messages.some((m) => m.role === "user")} />
 
+      <FilterBar onSearch={send} disabled={loading} />
+
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
         {empty ? (
           <div className="h-full flex items-center justify-center">
@@ -87,7 +90,7 @@ export default function ChatApp() {
             </div>
           </div>
         ) : (
-          messages.map((m) => <ChatMessage key={m.id} message={m} onChipClick={send} />)
+          messages.map((m) => <ChatMessage key={m.id} message={m} />)
         )}
         {loading && (
           <div className="flex justify-start">
