@@ -72,28 +72,50 @@ function tokenize(text: string): Tok[] {
 
 const chipBase =
   "inline-block rounded-md border px-1.5 py-0.5 text-[11px] font-semibold leading-none align-[2px] mx-[1px]";
+const interactive =
+  "cursor-pointer hover:brightness-125 active:scale-[0.97] transition";
 
-function RichLine({ text }: { text: string }) {
+function RichLine({ text, onChipClick }: { text: string; onChipClick?: (q: string) => void }) {
   const toks = tokenize(text);
   return (
     <>
       {toks.map((tok, i) => {
         if (tok.type === "stage") {
-          return (
-            <span key={i} className={`${chipBase} ${STAGE_STYLES[tok.value] ?? DEFAULT_STAGE}`}>
-              {tok.value}
-            </span>
-          );
+          const cls = `${chipBase} ${STAGE_STYLES[tok.value] ?? DEFAULT_STAGE}`;
+          if (onChipClick) {
+            return (
+              <button
+                key={i}
+                type="button"
+                onClick={() => onChipClick(tok.value)}
+                className={`${cls} ${interactive}`}
+                aria-label={`Show schedule for ${tok.value}`}
+              >
+                {tok.value}
+              </button>
+            );
+          }
+          return <span key={i} className={cls}>{tok.value}</span>;
         }
         if (tok.type === "day") {
-          const cls = W1_DAYS.has(tok.value)
+          const dayCls = W1_DAYS.has(tok.value)
             ? "bg-blue-500/20 text-blue-200 border-blue-500/40"
             : "bg-fuchsia-500/20 text-fuchsia-200 border-fuchsia-500/40";
-          return (
-            <span key={i} className={`${chipBase} ${cls}`}>
-              {tok.value}
-            </span>
-          );
+          const cls = `${chipBase} ${dayCls}`;
+          if (onChipClick) {
+            return (
+              <button
+                key={i}
+                type="button"
+                onClick={() => onChipClick(tok.value)}
+                className={`${cls} ${interactive}`}
+                aria-label={`Show lineup for ${tok.value}`}
+              >
+                {tok.value}
+              </button>
+            );
+          }
+          return <span key={i} className={cls}>{tok.value}</span>;
         }
         if (tok.type === "time") {
           return (
@@ -111,7 +133,13 @@ function RichLine({ text }: { text: string }) {
   );
 }
 
-export default function ChatMessage({ message }: { message: TChatMessage }) {
+export default function ChatMessage({
+  message,
+  onChipClick,
+}: {
+  message: TChatMessage;
+  onChipClick?: (query: string) => void;
+}) {
   const isUser = message.role === "user";
   if (isUser) {
     return (
@@ -134,7 +162,7 @@ export default function ChatMessage({ message }: { message: TChatMessage }) {
           if (isHeader) {
             return (
               <div key={i} className="text-xs uppercase tracking-wider font-bold text-gray-400 pt-1">
-                <RichLine text={line.replace(/:\s*$/, "")} />
+                <RichLine text={line.replace(/:\s*$/, "")} onChipClick={onChipClick} />
               </div>
             );
           }
@@ -143,14 +171,14 @@ export default function ChatMessage({ message }: { message: TChatMessage }) {
               <div key={i} className="flex gap-2 items-start">
                 <span className="text-yellow-400 mt-[2px]">•</span>
                 <span className="flex-1">
-                  <RichLine text={line.replace(/^\s*•\s/, "")} />
+                  <RichLine text={line.replace(/^\s*•\s/, "")} onChipClick={onChipClick} />
                 </span>
               </div>
             );
           }
           return (
             <div key={i}>
-              <RichLine text={line} />
+              <RichLine text={line} onChipClick={onChipClick} />
             </div>
           );
         })}

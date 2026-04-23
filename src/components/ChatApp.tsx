@@ -87,7 +87,7 @@ export default function ChatApp() {
             </div>
           </div>
         ) : (
-          messages.map((m) => <ChatMessage key={m.id} message={m} />)
+          messages.map((m) => <ChatMessage key={m.id} message={m} onChipClick={send} />)
         )}
         {loading && (
           <div className="flex justify-start">
