@@ -198,6 +198,40 @@ export const faqs: FAQ[] = [
     keywords: ["sponsorship", "sponsor", "sponsoring"],
   },
   {
+    topic: "Restrooms",
+    question: "Where are the bathrooms?",
+    answer:
+      "Toilets are spread all over the Fair Grounds — you're never far from one. Big clusters: behind the Festival Stage, around Heritage Square (between Blues Tent and Gospel Tent), near the Sauvage pedestrian entrance, behind the Shell Gentilly Stage, near the Sheraton Fais Do-Do Stage, by the Children's Activity Tent, and along both straightaways of the racetrack perimeter. The Grandstand has indoor, air-conditioned restrooms (changing stations are on the 1st floor of the women's room). Full map: /fairgrounds-map.pdf",
+    keywords: [
+      "bathroom", "bathrooms", "restroom", "restrooms",
+      "toilet", "toilets", "potty", "porta potty", "porta-potty", "porta-potties",
+      "ladies room", "mens room", "men's room",
+      "where can i pee", "need to pee", "pee",
+    ],
+  },
+  {
+    topic: "Water",
+    question: "Where can I refill my water bottle?",
+    answer:
+      "Free water refill stations are scattered across the grounds. Reliable spots: behind the Festival Stage, in/near Food Area 1 (center of the grounds), in/near Food Area 2 (left side), by the Children's Activity Tent, around the Grandstand, and along the perimeter walkways. Bring an empty reusable bottle (or any plastic bottle) and stay hydrated. Full map: /fairgrounds-map.pdf",
+    keywords: [
+      "water", "water bottle", "water bottles", "refill", "refill station", "refill stations",
+      "drinking water", "free water", "water fountain", "water fountains",
+      "fill up", "fill my bottle", "hydrate", "hydration", "stay hydrated",
+    ],
+  },
+  {
+    topic: "Map",
+    question: "Where can I find a map of the Fair Grounds?",
+    answer:
+      "The official 2026 Fair Grounds map is at /fairgrounds-map.pdf. It shows every stage, food area, restroom, water refill station, ADA Access Center, medical tent, and entrance. Save it to your phone before you head in.",
+    keywords: [
+      "map", "maps", "fairgrounds map", "fair grounds map", "festival map", "site map",
+      "show me the map", "where is the map", "where can i find the map",
+      "layout", "grounds map", "ground map",
+    ],
+  },
+  {
     topic: "Health & Safety",
     question: "What about COVID-19?",
     answer:

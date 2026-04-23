@@ -57,10 +57,14 @@ function editDistance(a: string, b: string): number {
 }
 
 // Two tokens are a fuzzy match if they're equal or within a length-scaled
-// edit-distance budget. Tight budget so unrelated words don't collide.
+// edit-distance budget. Tight rules so unrelated common words don't collide
+// — e.g. "main" must NOT fuzzy-match "pain".
 function fuzzyTokenMatch(qt: string, at: string): boolean {
   if (qt === at) return true;
   if (qt.length < 4 || at.length < 4) return false;
+  // Require the first character to agree. Most typos preserve the leading
+  // letter, and this rejects coincidental overlaps like "main" / "pain".
+  if (qt[0] !== at[0]) return false;
   if (Math.abs(qt.length - at.length) > 2) return false;
   const longer = Math.max(qt.length, at.length);
   const budget = longer >= 7 ? 2 : 1;
@@ -113,11 +117,20 @@ function scoreArtists(query: string): { artist: Artist; score: number }[] {
       scored.push({ artist: a, score: overlap * 2 });
       continue;
     }
-    const fuzzyOverlap = qTokens.filter((qt) =>
-      aTokens.some((at) => fuzzyTokenMatch(qt, at)),
+    // Fuzzy fallback. Require ALL of the artist's tokens to be matched by
+    // some query token — otherwise "main" fuzzy-matching "pain" would pull
+    // in T-Pain from a query like "main act on the main stage". For
+    // single-token artists, additionally require a short query so we don't
+    // grab artists out of long unrelated sentences.
+    const matchedArtistTokens = aTokens.filter((at) =>
+      qTokens.some((qt) => fuzzyTokenMatch(qt, at)),
     ).length;
-    if (fuzzyOverlap >= 2 || (fuzzyOverlap === 1 && aTokens.length === 1)) {
-      scored.push({ artist: a, score: fuzzyOverlap });
+    if (matchedArtistTokens === aTokens.length) {
+      if (aTokens.length >= 2) {
+        scored.push({ artist: a, score: matchedArtistTokens });
+      } else if (qTokens.length <= 2) {
+        scored.push({ artist: a, score: 1 });
+      }
     }
   }
   return scored.sort((a, b) => b.score - a.score);
@@ -138,6 +151,8 @@ function findArtists(query: string): Artist[] {
 // token) doesn't hijack — the aliases here require the distinctive word to
 // appear as its own phrase.
 const STAGE_ALIASES: { alias: string; stage: string }[] = [
+  { alias: "main stage", stage: "Festival Stage" },
+  { alias: "headliner stage", stage: "Festival Stage" },
   { alias: "gentilly stage", stage: "Shell Gentilly Stage" },
   { alias: "gentilly", stage: "Shell Gentilly Stage" },
   { alias: "fais do do stage", stage: "Sheraton New Orleans Fais Do-Do Stage" },
@@ -495,6 +510,9 @@ const PREV_PHRASES = [
 const PRONOUN_PHRASES = ["them", "they", "him", "her", "that band", "that artist", "that one", "those guys"];
 const HEADLINER_PHRASES = [
   "headliner", "headliners", "headlining", "headline",
+  "headline act", "headline acts", "headlining act", "headlining acts",
+  "main act", "main acts", "main artist", "main artists",
+  "main performance", "main performer",
   "who is closing", "whos closing", "who's closing",
   "closing set", "closing sets", "closer", "closers",
   "final set", "final sets", "last set of the day",
