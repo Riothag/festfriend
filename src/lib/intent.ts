@@ -35,6 +35,38 @@ function tokens(s: string): string[] {
   return norm(s).split(" ").filter((t) => t.length > 2 && !STOPWORDS.has(t));
 }
 
+// Iterative Levenshtein with O(n) memory. Used to forgive small typos in
+// artist names ("rod stewert" → "Rod Stewart").
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  const curr = new Array(n + 1).fill(0);
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    prev = curr.slice();
+  }
+  return prev[n];
+}
+
+// Two tokens are a fuzzy match if they're equal or within a length-scaled
+// edit-distance budget. Tight budget so unrelated words don't collide.
+function fuzzyTokenMatch(qt: string, at: string): boolean {
+  if (qt === at) return true;
+  if (qt.length < 4 || at.length < 4) return false;
+  if (Math.abs(qt.length - at.length) > 2) return false;
+  const longer = Math.max(qt.length, at.length);
+  const budget = longer >= 7 ? 2 : 1;
+  return editDistance(qt, at) <= budget;
+}
+
 // ---- Lookups ----
 
 // Words that look like they could match an artist name via substring but are
@@ -68,7 +100,8 @@ function scoreArtists(query: string): { artist: Artist; score: number }[] {
     })
     .map((a) => ({ artist: a, score: 50 }));
   if (substring.length > 0) return substring;
-  // Token overlap with stopwords filtered
+  // Token overlap with stopwords filtered. Falls back to fuzzy matching
+  // (small edit distance) so light typos like "rod stewert" still match.
   const qTokens = tokens(q);
   if (qTokens.length === 0) return [];
   const scored: { artist: Artist; score: number }[] = [];
@@ -77,7 +110,14 @@ function scoreArtists(query: string): { artist: Artist; score: number }[] {
     if (aTokens.length === 0) continue;
     const overlap = qTokens.filter((t) => aTokens.includes(t)).length;
     if (overlap >= 2 || (overlap === 1 && aTokens.length === 1)) {
-      scored.push({ artist: a, score: overlap });
+      scored.push({ artist: a, score: overlap * 2 });
+      continue;
+    }
+    const fuzzyOverlap = qTokens.filter((qt) =>
+      aTokens.some((at) => fuzzyTokenMatch(qt, at)),
+    ).length;
+    if (fuzzyOverlap >= 2 || (fuzzyOverlap === 1 && aTokens.length === 1)) {
+      scored.push({ artist: a, score: fuzzyOverlap });
     }
   }
   return scored.sort((a, b) => b.score - a.score);
@@ -167,6 +207,27 @@ function whichDayPrompt(days: FestivalDay[], originalQuery: string): { response:
   };
 }
 
+// Resolve "today" / "tonight" / "tomorrow" / "yesterday" to a festival day,
+// or null if the resulting calendar date isn't a festival day.
+function resolveRelativeDay(q: string): FestivalDay | null {
+  let offset: number | null = null;
+  if (/\b(today|tonight)\b/.test(q)) offset = 0;
+  else if (/\btomorrow\b/.test(q)) offset = 1;
+  else if (/\byesterday\b/.test(q)) offset = -1;
+  if (offset === null) return null;
+
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: festivalTimezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  const todayUtc = new Date(`${get("year")}-${get("month")}-${get("day")}T00:00:00Z`);
+  const targetStr = new Date(todayUtc.getTime() + offset * 86400000).toISOString().slice(0, 10);
+  return festivalDays.find((d) => d.date === targetStr)?.day ?? null;
+}
+
 // Resolve a query to one or more festival days. Empty array if no day reference.
 function findDays(query: string): FestivalDay[] {
   const q = norm(query);
@@ -175,6 +236,9 @@ function findDays(query: string): FestivalDay[] {
     if (q.includes(norm(d.day))) matches.push(d.day);
   }
   if (matches.length > 0) return Array.from(new Set(matches));
+
+  const relative = resolveRelativeDay(q);
+  if (relative) return [relative];
 
   const has = (w: string) => new RegExp(`\\b${w}\\b`).test(q);
   const byWeekday = (weekday: "fri" | "sat" | "sun" | "thu"): FestivalDay[] =>
