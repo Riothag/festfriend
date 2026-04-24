@@ -764,9 +764,16 @@ export function handleStageLookup(query: string): { response: string; pending?: 
   if (days.length > 1) return whichDayPrompt(days, query);
   let sets = artists.filter((a) => a.stage === s.stage_name);
   let dayContext = "";
-  if (days.length === 1) {
-    sets = sets.filter((a) => a.day === days[0]);
-    dayContext = ` — ${days[0]}`;
+  let dayPinned: FestivalDay | null = days.length === 1 ? days[0] : null;
+  // If the user didn't mention a day but the festival is live right now,
+  // default to today — at the fest "what's on this stage" really means today.
+  if (!dayPinned) {
+    const today = getFestivalNow().day;
+    if (today) dayPinned = today;
+  }
+  if (dayPinned) {
+    sets = sets.filter((a) => a.day === dayPinned);
+    dayContext = ` — ${dayPinned}`;
   }
   sets = sets.sort((a, b) => {
     const byDay = festivalDayIndex(a.day) - festivalDayIndex(b.day);
@@ -779,23 +786,39 @@ export function handleStageLookup(query: string): { response: string; pending?: 
   return { response: [`${s.stage_name}${dayContext}`, s.description, "", ...sets.map(artistLine)].join("\n") };
 }
 
-export function handleNowPlaying(): string {
+export function handleNowPlaying(query: string = ""): string {
   const { day, minutes } = getFestivalNow();
   if (!day) {
     return "Nothing playing right now — not a festival day. Try \"who's on Festival Stage\" or \"any funk on Saturday\".";
   }
+  const stage = findStage(query);
+  const onStage = (a: Artist) => !stage || a.stage === stage.stage_name;
+  const label = stage ? `${stage.stage_name} now` : `Playing now (${day})`;
+
   const live = artists.filter(
-    (a) => a.day === day && toMinutes(a.start_time) <= minutes && toMinutes(a.end_time) > minutes
+    (a) =>
+      a.day === day &&
+      toMinutes(a.start_time) <= minutes &&
+      toMinutes(a.end_time) > minutes &&
+      onStage(a),
   );
-  if (live.length === 0) {
-    const upcoming = artists
-      .filter((a) => a.day === day && toMinutes(a.start_time) > minutes)
-      .sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time))
-      .slice(0, 4);
-    if (upcoming.length === 0) return `No sets left today (${day}).`;
-    return [`Nothing on stage at the minute. Up next on ${day}:`, ...upcoming.map(artistLine)].join("\n");
+  if (live.length > 0) {
+    return [`${label}:`, ...live.map(artistLine)].join("\n");
   }
-  return [`Playing now (${day}):`, ...live.map(artistLine)].join("\n");
+
+  const upcoming = artists
+    .filter((a) => a.day === day && toMinutes(a.start_time) > minutes && onStage(a))
+    .sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time))
+    .slice(0, stage ? 3 : 4);
+  if (upcoming.length === 0) {
+    return stage
+      ? `Nothing left on ${stage.stage_name} today (${day}).`
+      : `No sets left today (${day}).`;
+  }
+  const header = stage
+    ? `Nothing on ${stage.stage_name} right now. Up next there:`
+    : `Nothing on stage at the minute. Up next on ${day}:`;
+  return [header, ...upcoming.map(artistLine)].join("\n");
 }
 
 function hasPronoun(query: string): boolean {
@@ -1289,7 +1312,7 @@ export function answer(query: string, context?: AnswerContext): AnswerResult {
   const intent = classify(trimmed);
   switch (intent) {
     case "now_playing":
-      return { intent, response: handleNowPlaying() };
+      return { intent, response: handleNowPlaying(trimmed) };
     case "stage_lookup":
       return { intent, ...handleStageLookup(trimmed) };
     case "artist_bio":
