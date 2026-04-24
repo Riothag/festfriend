@@ -50,7 +50,7 @@ export default function EmailGate({ onUnlock }: { onUnlock: (email: string) => v
         <p className="mt-6 text-lg text-gray-600">
           Schedules, stages, food, and artists.
           <br />
-          <span className="text-black font-semibold">Ask like you&apos;re texting a local.</span>
+          <span className="text-black font-semibold">Fast answers while you&apos;re on the grounds.</span>
         </p>
       </div>
 

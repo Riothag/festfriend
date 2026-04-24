@@ -1,14 +1,24 @@
 # Connect Fest Friend to your Google Sheet
 
-Two-minute setup. After this, every email entered in the app writes a row to your sheet.
+Two-minute setup. After this, every email entered in the app writes a row to your sheet, and every chat message writes a row to a **Queries** tab.
 
 ## Step 1 — Prepare the sheet
 
-You already created **Fest Friend sign up**. Open it and make sure Row 1 has these four headers (exact spelling, order matters):
+You already created **Fest Friend sign up**. Open it and:
 
-| A | B | C | D |
-|---|---|---|---|
-| Timestamp | Email | User Agent | IP |
+1. On the first (signup) tab, make sure Row 1 has these headers (exact spelling, order matters):
+
+   | A | B | C | D |
+   |---|---|---|---|
+   | Timestamp | Email | User Agent | IP |
+
+2. Add a second tab named exactly **`Queries`** with these headers in Row 1:
+
+   | A | B | C |
+   |---|---|---|
+   | Timestamp | Query | Response |
+
+   (The Apps Script below will auto-create this tab if it doesn't exist, but creating it yourself keeps the headers clean.)
 
 ## Step 2 — Paste the Apps Script
 
@@ -17,18 +27,35 @@ You already created **Fest Friend sign up**. Open it and make sure Row 1 has the
 3. Paste this in:
 
 ```js
-// Fest Friend — email signup receiver.
-// Appends one row per POST to the active spreadsheet.
+// Fest Friend — receiver for both email signups and chat queries.
+// Routes by the `type` field: "query" → Queries tab, else first tab (signups).
 function doPost(e) {
   try {
     const data = JSON.parse(e.postData.contents || "{}");
-    const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-    sheet.appendRow([
-      data.timestamp || new Date().toISOString(),
-      data.email || "",
-      data.user_agent || "",
-      data.ip || "",
-    ]);
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    if (data.type === "query") {
+      let sheet = ss.getSheetByName("Queries");
+      if (!sheet) {
+        sheet = ss.insertSheet("Queries");
+        sheet.appendRow(["Timestamp", "Query", "Response"]);
+      }
+      sheet.appendRow([
+        data.timestamp || new Date().toISOString(),
+        data.query || "",
+        data.response || "",
+      ]);
+    } else {
+      // Email signup — first tab (keeps existing behavior).
+      const sheet = ss.getSheets()[0];
+      sheet.appendRow([
+        data.timestamp || new Date().toISOString(),
+        data.email || "",
+        data.user_agent || "",
+        data.ip || "",
+      ]);
+    }
+
     return ContentService
       .createTextOutput(JSON.stringify({ ok: true }))
       .setMimeType(ContentService.MimeType.JSON);
@@ -44,7 +71,7 @@ function doPost(e) {
 // access setting is wrong.
 function doGet() {
   return ContentService
-    .createTextOutput(JSON.stringify({ ok: true, hint: "POST JSON with { email } to record a signup." }))
+    .createTextOutput(JSON.stringify({ ok: true, hint: "POST JSON with { email } or { type: 'query', query, response }." }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 ```

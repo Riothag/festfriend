@@ -47,12 +47,24 @@ export default function ChatApp() {
       // Stash any new pending follow-up, or clear the previous one if the
       // server consumed it.
       pendingRef.current = (data?.pending as PendingDisambiguation | undefined) ?? null;
+      const botText: string = data?.response ?? "No answer.";
       const botMsg: TChatMessage = {
         id: `a-${Date.now()}`,
         role: "assistant",
-        text: data?.response ?? "No answer.",
+        text: botText,
       };
       setMessages((m) => [...m, botMsg]);
+      // Fire-and-forget: log the Q/A to the sheet and GA. Never blocks UI,
+      // never surfaces errors to the user.
+      void fetch("/api/log-query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: text, response: botText }),
+      }).catch(() => {});
+      if (typeof window !== "undefined") {
+        const w = window as unknown as { gtag?: (...args: unknown[]) => void };
+        w.gtag?.("event", "query_sent", { query_text: text });
+      }
     } catch {
       setMessages((m) => [
         ...m,
