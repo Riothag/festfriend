@@ -18,7 +18,7 @@ export default function Home() {
 
   // Avoid hydration flash — render nothing on first paint.
   if (!mounted) {
-    return <div className="min-h-[100svh] bg-black" />;
+    return <div className="min-h-[100svh] bg-white" />;
   }
 
   const handleUnlock = (email: string) => {

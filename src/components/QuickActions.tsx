@@ -14,7 +14,7 @@ export default function QuickActions({ onPrompt }: { onPrompt: (prompt: string) 
         <button
           key={b.label}
           onClick={() => onPrompt(b.prompt)}
-          className="rounded-xl border border-gray-800 bg-gray-950 text-white text-sm font-medium py-3 px-3 active:bg-gray-900"
+          className="rounded-xl border border-gray-200 bg-gray-50 text-black text-sm font-medium py-3 px-3 active:bg-gray-100"
         >
           {b.label}
         </button>

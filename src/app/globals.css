@@ -1,13 +1,13 @@
 @import "tailwindcss";
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 html,
 body {
-  background: #000;
-  color: #fff;
+  background: #fff;
+  color: #111;
   overscroll-behavior-y: none;
   -webkit-text-size-adjust: 100%;
 }

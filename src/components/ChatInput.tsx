@@ -30,7 +30,7 @@ export default function ChatInput({
         value={value}
         onChange={(e) => setValue(e.target.value)}
         disabled={disabled}
-        className="flex-1 rounded-full bg-gray-900 border border-gray-800 px-5 py-4 text-base text-white placeholder:text-gray-500 focus:outline-none focus:border-yellow-400 disabled:opacity-60"
+        className="flex-1 rounded-full bg-gray-50 border border-gray-200 px-5 py-4 text-base text-black placeholder:text-gray-400 focus:outline-none focus:border-amber-500 disabled:opacity-60"
       />
       <button
         type="submit"

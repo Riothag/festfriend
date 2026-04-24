@@ -44,10 +44,10 @@ export default function FilterBar({
   };
 
   const selectClass =
-    "min-w-0 flex-1 appearance-none rounded-full bg-gray-900 border border-gray-800 px-3 py-2 text-xs text-white focus:outline-none focus:border-yellow-400 disabled:opacity-50";
+    "min-w-0 flex-1 appearance-none rounded-full bg-gray-50 border border-gray-200 px-3 py-2 text-xs text-black focus:outline-none focus:border-amber-500 disabled:opacity-50";
 
   return (
-    <div className="border-b border-gray-900 bg-black px-3 py-2">
+    <div className="border-b border-gray-200 bg-white px-3 py-2">
       <div className="flex items-center gap-1.5">
         <select
           value={day}

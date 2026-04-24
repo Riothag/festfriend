@@ -38,26 +38,26 @@ export default function EmailGate({ onUnlock }: { onUnlock: (email: string) => v
   };
 
   return (
-    <div className="flex min-h-[100svh] w-full flex-col items-center justify-between bg-black text-white px-6 py-10">
+    <div className="flex min-h-[100svh] w-full flex-col items-center justify-between bg-white text-black px-6 py-10">
       <div className="w-full max-w-md mx-auto flex flex-col pt-12 text-left">
-        <p className="text-sm font-bold tracking-[0.2em] text-yellow-400 uppercase">
+        <p className="text-sm font-bold tracking-[0.2em] text-amber-600 uppercase">
           Jazz Fest 2026
         </p>
         <h1 className="mt-4 text-5xl font-extrabold tracking-tight leading-[1.05]">
           The fest in{" "}
-          <span className="italic font-serif text-yellow-400">your pocket.</span>
+          <span className="italic font-serif text-amber-500">your pocket.</span>
         </h1>
-        <p className="mt-6 text-lg text-gray-300">
+        <p className="mt-6 text-lg text-gray-600">
           Schedules, stages, food, and artists.
           <br />
-          <span className="text-white font-semibold">Ask like you&apos;re texting a local.</span>
+          <span className="text-black font-semibold">Ask like you&apos;re texting a local.</span>
         </p>
       </div>
 
       <div className="w-full max-w-md mx-auto">
         <form onSubmit={submit} className="space-y-3">
           {error && (
-            <div className="rounded-md bg-red-900/40 border border-red-700 text-red-200 text-sm p-3">
+            <div className="rounded-md bg-red-50 border border-red-200 text-red-700 text-sm p-3">
               {error}
             </div>
           )}
@@ -73,7 +73,7 @@ export default function EmailGate({ onUnlock }: { onUnlock: (email: string) => v
             onChange={(e) => setEmail(e.target.value)}
             disabled={loading}
             required
-            className="w-full rounded-full bg-gray-900 border border-gray-800 px-5 py-4 text-base text-white placeholder:text-gray-500 focus:outline-none focus:border-yellow-400 disabled:opacity-60"
+            className="w-full rounded-full bg-gray-50 border border-gray-200 px-5 py-4 text-base text-black placeholder:text-gray-400 focus:outline-none focus:border-amber-500 disabled:opacity-60"
           />
           <button
             type="submit"
@@ -89,7 +89,7 @@ export default function EmailGate({ onUnlock }: { onUnlock: (email: string) => v
             href="https://thevaultcollective.co"
             target="_blank"
             rel="noopener noreferrer"
-            className="underline hover:text-gray-300"
+            className="underline hover:text-gray-700"
           >
             The Vault Collective
           </a>

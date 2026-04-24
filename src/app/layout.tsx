@@ -23,7 +23,7 @@ export const viewport: Viewport = {
   maximumScale: 1,
   userScalable: false,
   viewportFit: "cover",
-  themeColor: "#000000",
+  themeColor: "#ffffff",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -54,7 +54,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     `;
   return (
     <html lang="en">
-      <body className="antialiased bg-black text-white">
+      <body className="antialiased bg-white text-black">
         {children}
         <script dangerouslySetInnerHTML={{ __html: swScript }} />
       </body>
