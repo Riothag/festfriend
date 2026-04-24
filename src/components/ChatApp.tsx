@@ -40,6 +40,9 @@ export default function ChatApp() {
           pending: pendingRef.current ?? undefined,
         }),
       });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
       const data = await res.json();
       if (typeof data?.resolvedArtist === "string") {
         lastArtistRef.current = data.resolvedArtist;
@@ -65,10 +68,15 @@ export default function ChatApp() {
         const w = window as unknown as { gtag?: (...args: unknown[]) => void };
         w.gtag?.("event", "query_sent", { query_text: text });
       }
-    } catch {
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
       setMessages((m) => [
         ...m,
-        { id: `a-${Date.now()}`, role: "assistant", text: "Network error. Try again." },
+        {
+          id: `a-${Date.now()}`,
+          role: "assistant",
+          text: `Network error. Try again.\n(${detail})`,
+        },
       ]);
     } finally {
       setLoading(false);

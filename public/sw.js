@@ -2,7 +2,7 @@
 // Caches the app shell for offline "Add to Home Screen" reliability.
 // Bump CACHE_VERSION when you ship new assets.
 
-const CACHE_VERSION = "festfriend-v3";
+const CACHE_VERSION = "festfriend-v4";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {
