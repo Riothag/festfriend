@@ -421,6 +421,9 @@ function matchesAnyGenre(artist: Artist, genreTokens: string[]): boolean {
 function parseClockTime(query: string): number | null {
   const q = query.toLowerCase();
 
+  // (0) "noon" / "midday" → 12:00 PM. (Midnight isn't a festival hour.)
+  if (/\b(noon|midday)\b/.test(q)) return 12 * 60;
+
   // (1) "5pm", "5 pm", "5:30pm", "5:30 pm" — explicit am/pm.
   const reAmPm = /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/;
   const m = q.match(reAmPm);
@@ -710,6 +713,16 @@ function artistLine(a: Artist) {
   return `• ${a.artist_name} — ${a.day}, ${formatTime(a.start_time)}–${formatTime(a.end_time)} on ${a.stage}`;
 }
 
+// Compact bullet that drops day/stage when the surrounding context already
+// pins them (e.g. listing a single stage's lineup for one day).
+function artistLineCompact(a: Artist, opts: { hideDay?: boolean; hideStage?: boolean } = {}) {
+  const time = `${formatTime(a.start_time)}–${formatTime(a.end_time)}`;
+  const parts = [a.artist_name, time];
+  if (!opts.hideDay) parts.push(a.day);
+  if (!opts.hideStage) parts.push(a.stage);
+  return `• ${parts.join(" · ")}`;
+}
+
 function noArtistFound(query: string) {
   return `I can't find that artist. Try a full name like "Trombone Shorty" or "Stevie Nicks". Your query: "${query}".`;
 }
@@ -781,9 +794,27 @@ export function handleStageLookup(query: string): { response: string; pending?: 
     return toMinutes(a.start_time) - toMinutes(b.start_time);
   });
   if (sets.length === 0) {
-    return { response: `${s.stage_name}${dayContext}\n${s.description}\n\nNo sets in the current data.` };
+    return { response: `${s.stage_name}${dayContext}\nNo sets in the current data.` };
   }
-  return { response: [`${s.stage_name}${dayContext}`, s.description, "", ...sets.map(artistLine)].join("\n") };
+  // When a day is pinned, drop the description (filler) and the redundant
+  // stage/day on each line. When no day is pinned (full-stage view), keep
+  // the description and the day chip per line so the list is navigable.
+  if (dayPinned) {
+    return {
+      response: [
+        `${s.stage_name}${dayContext}:`,
+        ...sets.map((a) => artistLineCompact(a, { hideDay: true, hideStage: true })),
+      ].join("\n"),
+    };
+  }
+  return {
+    response: [
+      `${s.stage_name}${dayContext}`,
+      s.description,
+      "",
+      ...sets.map((a) => artistLineCompact(a, { hideStage: true })),
+    ].join("\n"),
+  };
 }
 
 export function handleNowPlaying(query: string = ""): string {
@@ -803,7 +834,19 @@ export function handleNowPlaying(query: string = ""): string {
       onStage(a),
   );
   if (live.length > 0) {
-    return [`${label}:`, ...live.map(artistLine)].join("\n");
+    // Single-stage, single-set → tight answer.
+    if (stage && live.length === 1) {
+      const a = live[0];
+      return [
+        a.artist_name,
+        `${formatTime(a.start_time)}–${formatTime(a.end_time)}`,
+        `${a.stage} · ${a.day}`,
+      ].join("\n");
+    }
+    return [
+      `${label}:`,
+      ...live.map((a) => artistLineCompact(a, { hideDay: true, hideStage: Boolean(stage) })),
+    ].join("\n");
   }
 
   const upcoming = artists
@@ -818,7 +861,10 @@ export function handleNowPlaying(query: string = ""): string {
   const header = stage
     ? `Nothing on ${stage.stage_name} right now. Up next there:`
     : `Nothing on stage at the minute. Up next on ${day}:`;
-  return [header, ...upcoming.map(artistLine)].join("\n");
+  return [
+    header,
+    ...upcoming.map((a) => artistLineCompact(a, { hideDay: true, hideStage: Boolean(stage) })),
+  ].join("\n");
 }
 
 function hasPronoun(query: string): boolean {
@@ -1047,7 +1093,23 @@ export function handleTimeWindow(query: string): { response: string; pending?: P
   if (stage) sets = sets.filter((a) => a.stage === stage.stage_name);
   sets = sets.sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time));
   if (sets.length === 0) return { response: `${label} on ${targetDay}: nothing in the data.` };
-  return { response: [`${label} on ${targetDay}:`, ...sets.map(artistLine)].join("\n") };
+  // Hyper-specific query (one stage, one moment, one band) → tight answer.
+  if (sets.length === 1 && stage) {
+    const a = sets[0];
+    return {
+      response: [
+        a.artist_name,
+        `${formatTime(a.start_time)}–${formatTime(a.end_time)}`,
+        `${a.stage} · ${a.day}`,
+      ].join("\n"),
+    };
+  }
+  return {
+    response: [
+      `${label} on ${targetDay}:`,
+      ...sets.map((a) => artistLineCompact(a, { hideDay: true, hideStage: Boolean(stage) })),
+    ].join("\n"),
+  };
 }
 
 // ---- Cultural programming ----
