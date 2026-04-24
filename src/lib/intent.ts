@@ -511,6 +511,10 @@ const PREV_PHRASES = [
   "who opens for", "who opened for",
 ];
 const PRONOUN_PHRASES = ["them", "they", "him", "her", "that band", "that artist", "that one", "those guys"];
+// Stage-referring pronouns / deictics — resolved against context.lastStage.
+const STAGE_PRONOUN_PHRASES = ["there", "that stage", "same stage", "this stage"];
+// Day-referring pronouns / deictics — resolved against context.lastDay.
+const DAY_PRONOUN_PHRASES = ["that day", "same day", "then"];
 const HEADLINER_PHRASES = [
   "headliner", "headliners", "headlining", "headline",
   "headline act", "headline acts", "headlining act", "headlining acts",
@@ -586,6 +590,32 @@ const NORMED_GENRE_LIST = GENRE_LIST_PHRASES.map(norm).filter(Boolean);
 const NORMED_CULTURAL = CULTURAL_PHRASES.map(norm).filter(Boolean);
 const NORMED_FAQ_STARTERS = FAQ_QUESTION_STARTERS.map(norm).filter(Boolean);
 
+// Detects questions about the festival's own schedule — gate open/close,
+// "when does it start today", "what time does the fest end", etc. The
+// festival subject can be explicit ("fest", "festival", "jazz fest",
+// "gates") or implicit ("it" / "its" when no artist or stage is mentioned).
+//
+// Paired with a time word ("when", "what time", "hours") and an hours verb
+// ("start", "open", "close", "end", "over", "run", "finish").
+function isFestivalHoursQuery(normQuery: string): boolean {
+  const hasTimeWord =
+    /\b(when|what\s+time)\b/.test(normQuery) || /\bhours?\b/.test(normQuery);
+  if (!hasTimeWord) return false;
+  const hasHoursVerb =
+    /\b(start|starts|started|begin|begins|open|opens|opened|opening|close|closes|closed|closing|end|ends|ending|over|done|finish|finishes|finished|run|runs|hours?)\b/.test(
+      normQuery,
+    );
+  if (!hasHoursVerb) return false;
+  const explicitFestival =
+    /\b(fest|festival|jazz\s*fest|gates?|doors?)\b/.test(normQuery);
+  if (explicitFestival) return true;
+  // Implicit "it" — only treat as festival-reference when no competing
+  // subject is present (no artist and no stage in the query).
+  const hasIt = /\b(it|its)\b/.test(normQuery);
+  if (!hasIt) return false;
+  return !findArtist(normQuery) && !findStage(normQuery);
+}
+
 // FAQ relevance scoring — returns the best FAQ, or null. Uses word-boundary
 // matching so "hat" doesn't hit inside "what" and "where" doesn't always fire.
 function scoreFaq(query: string): { faq: FAQ; score: number } | null {
@@ -618,6 +648,13 @@ export function classify(query: string): Intent {
   //    get hijacked by the stage_lookup fallback.
   if (NORMED_CULTURAL.some((p) => q.includes(p))) return "cultural_lookup";
 
+  // 0.25. FESTIVAL HOURS — "when does it start today", "what time does the
+  //       fest open", "when do gates open", "is the festival over".
+  //       Routes to faq_lookup, where handleFaqLookup detects this shape and
+  //       returns gate hours (optionally scoped to a day). Must run BEFORE
+  //       the time-phrase → artist_lookup branch.
+  if (isFestivalHoursQuery(q)) return "faq_lookup";
+
   // 0.5. FAQ — strong match runs EARLY so "is jazz fest cashless" doesn't
   //      get hijacked by the "jazz" genre token. Two triggers:
   //        (a) any FAQ keyword is multi-word (precise, score ≥ 3)
@@ -645,6 +682,15 @@ export function classify(query: string): Intent {
 
   // 3. NOW — "who's playing now"
   if (NORMED_NOW.some((p) => q.includes(p))) return "now_playing";
+
+  // 3b. STAGE-PRONOUN — "what's next there?", "anything on that stage Sunday?".
+  //     Resolved in handleStageLookup against context.lastStage. Only fires
+  //     when no explicit stage name is in the query (otherwise the normal
+  //     stage rules win).
+  const hasStagePronounRef = STAGE_PRONOUN_PHRASES.some((p) =>
+    new RegExp(`\\b${p}\\b`).test(q),
+  );
+  if (hasStagePronounRef && !findStage(q) && !findArtist(q)) return "stage_lookup";
 
   // 4. TIME WINDOW — "tonight", "later today", "next hour"
   if (NORMED_TIME_WINDOW.some((p) => q.includes(p))) return "time_window";
@@ -731,32 +777,108 @@ function disambiguationLine(a: Artist) {
   return `• ${a.artist_name} — ${a.day}, ${formatTime(a.start_time)}–${formatTime(a.end_time)} on ${a.stage}`;
 }
 
-function maybeDisambiguate(query: string): { response: string; resolvedArtist?: string } | null {
-  const matches = findArtists(query);
-  if (matches.length <= 1) return null;
+// Apply a day filter to artist matches when the query references a day
+// ("today", "tomorrow", "Saturday", "May 2", etc.). Returns:
+//   - { filtered }: matches narrowed to the requested day(s); empty if the
+//     artist exists but isn't playing then.
+//   - null: no day reference in the query, caller should use raw matches.
+function filterMatchesByDay(
+  query: string,
+  matches: Artist[],
+): { filtered: Artist[]; requestedDays: FestivalDay[] } | null {
+  const days = findDays(query);
+  if (days.length === 0) return null;
+  const daySet = new Set(days);
   return {
-    response: [
-      `${matches.length} matches for "${query}". Which one?`,
-      ...matches.map(disambiguationLine),
-    ].join("\n"),
+    filtered: matches.filter((a) => daySet.has(a.day as FestivalDay)),
+    requestedDays: days,
   };
 }
 
-export function handleArtistLookup(query: string): { response: string; resolvedArtist?: string } {
-  const dis = maybeDisambiguate(query);
-  if (dis) return dis;
-  const a = findArtist(query);
+function artistNotOnDayResponse(
+  matches: Artist[],
+  requestedDays: FestivalDay[],
+): { response: string; resolvedArtist?: string } {
+  const dayLabel = requestedDays.length === 1 ? requestedDays[0] : "that day";
+  // Sort other sets by festival day order so "next" is meaningful.
+  const others = [...matches].sort(
+    (a, b) => festivalDayIndex(a.day) - festivalDayIndex(b.day),
+  );
+  const name = others[0].artist_name;
+  const lines = [`${name} isn't playing ${dayLabel}.`];
+  if (others.length === 1) {
+    const a = others[0];
+    lines.push(
+      `Playing ${a.day}, ${formatTime(a.start_time)}–${formatTime(a.end_time)} on ${a.stage}.`,
+    );
+  } else {
+    lines.push("Other sets:");
+    lines.push(...others.map(disambiguationLine));
+  }
+  return { response: lines.join("\n"), resolvedArtist: name };
+}
+
+export function handleArtistLookup(query: string): {
+  response: string;
+  resolvedArtist?: string;
+  resolvedStage?: string;
+  resolvedDay?: FestivalDay;
+} {
+  let matches = findArtists(query);
+  const dayFilter = filterMatchesByDay(query, matches);
+  if (dayFilter) {
+    if (dayFilter.filtered.length === 0 && matches.length > 0) {
+      return artistNotOnDayResponse(matches, dayFilter.requestedDays);
+    }
+    matches = dayFilter.filtered;
+  }
+  if (matches.length > 1) {
+    return {
+      response: [
+        `${matches.length} matches for "${query}". Which one?`,
+        ...matches.map(disambiguationLine),
+      ].join("\n"),
+      resolvedArtist: matches[0].artist_name,
+    };
+  }
+  const a = matches[0];
   if (!a) return { response: noArtistFound(query) };
   return {
-    response: [`${a.artist_name}`, `${a.day} · ${formatTime(a.start_time)}–${formatTime(a.end_time)}`, `${a.stage}`].join("\n"),
+    response: [
+      `${a.artist_name}`,
+      `${a.day} · ${formatTime(a.start_time)}–${formatTime(a.end_time)}`,
+      `${a.stage}`,
+    ].join("\n"),
     resolvedArtist: a.artist_name,
+    resolvedStage: a.stage,
+    resolvedDay: a.day as FestivalDay,
   };
 }
 
-export function handleArtistBio(query: string): { response: string; resolvedArtist?: string } {
-  const dis = maybeDisambiguate(query);
-  if (dis) return dis;
-  const a = findArtist(query);
+export function handleArtistBio(query: string): {
+  response: string;
+  resolvedArtist?: string;
+  resolvedStage?: string;
+  resolvedDay?: FestivalDay;
+} {
+  let matches = findArtists(query);
+  const dayFilter = filterMatchesByDay(query, matches);
+  if (dayFilter) {
+    if (dayFilter.filtered.length === 0 && matches.length > 0) {
+      return artistNotOnDayResponse(matches, dayFilter.requestedDays);
+    }
+    matches = dayFilter.filtered;
+  }
+  if (matches.length > 1) {
+    return {
+      response: [
+        `${matches.length} matches for "${query}". Which one?`,
+        ...matches.map(disambiguationLine),
+      ].join("\n"),
+      resolvedArtist: matches[0].artist_name,
+    };
+  }
+  const a = matches[0];
   if (!a) return { response: noArtistFound(query) };
   return {
     response: [
@@ -767,11 +889,23 @@ export function handleArtistBio(query: string): { response: string; resolvedArti
       `Playing ${a.day}, ${formatTime(a.start_time)}–${formatTime(a.end_time)} on ${a.stage}.`,
     ].join("\n"),
     resolvedArtist: a.artist_name,
+    resolvedStage: a.stage,
+    resolvedDay: a.day as FestivalDay,
   };
 }
 
-export function handleStageLookup(query: string): { response: string; pending?: PendingDisambiguation } {
-  const s = findStage(query);
+export function handleStageLookup(query: string, context?: AnswerContext): {
+  response: string;
+  pending?: PendingDisambiguation;
+  resolvedStage?: string;
+  resolvedDay?: FestivalDay;
+} {
+  let s = findStage(query);
+  // "what's next there?" — resolve via lastStage if the query points to a
+  // stage-pronoun and no explicit stage was parsed.
+  if (!s && hasStagePronoun(query) && context?.lastStage) {
+    s = stages.find((st) => st.stage_name === context.lastStage) ?? null;
+  }
   if (!s) return { response: `No stage matches "${query}". Try: ${stages.map((x) => x.stage_name).join(", ")}.` };
   const days = findDays(query);
   if (days.length > 1) return whichDayPrompt(days, query);
@@ -794,7 +928,11 @@ export function handleStageLookup(query: string): { response: string; pending?: 
     return toMinutes(a.start_time) - toMinutes(b.start_time);
   });
   if (sets.length === 0) {
-    return { response: `${s.stage_name}${dayContext}\nNo sets in the current data.` };
+    return {
+      response: `${s.stage_name}${dayContext}\nNo sets in the current data.`,
+      resolvedStage: s.stage_name,
+      resolvedDay: dayPinned ?? undefined,
+    };
   }
   // When a day is pinned, drop the description (filler) and the redundant
   // stage/day on each line. When no day is pinned (full-stage view), keep
@@ -805,6 +943,8 @@ export function handleStageLookup(query: string): { response: string; pending?: 
         `${s.stage_name}${dayContext}:`,
         ...sets.map((a) => artistLineCompact(a, { hideDay: true, hideStage: true })),
       ].join("\n"),
+      resolvedStage: s.stage_name,
+      resolvedDay: dayPinned,
     };
   }
   return {
@@ -814,6 +954,7 @@ export function handleStageLookup(query: string): { response: string; pending?: 
       "",
       ...sets.map((a) => artistLineCompact(a, { hideStage: true })),
     ].join("\n"),
+    resolvedStage: s.stage_name,
   };
 }
 
@@ -872,6 +1013,16 @@ function hasPronoun(query: string): boolean {
   return PRONOUN_PHRASES.some((p) => new RegExp(`\\b${p}\\b`).test(q));
 }
 
+function hasStagePronoun(query: string): boolean {
+  const q = norm(query);
+  return STAGE_PRONOUN_PHRASES.some((p) => new RegExp(`\\b${p}\\b`).test(q));
+}
+
+function hasDayPronoun(query: string): boolean {
+  const q = norm(query);
+  return DAY_PRONOUN_PHRASES.some((p) => new RegExp(`\\b${p}\\b`).test(q));
+}
+
 function resolveArtist(query: string, context?: AnswerContext): Artist | null {
   const direct = findArtist(query);
   if (direct) return direct;
@@ -879,7 +1030,12 @@ function resolveArtist(query: string, context?: AnswerContext): Artist | null {
   return null;
 }
 
-export function handleNextOnStage(query: string, context?: AnswerContext): { response: string; resolvedArtist?: string } {
+export function handleNextOnStage(query: string, context?: AnswerContext): {
+  response: string;
+  resolvedArtist?: string;
+  resolvedStage?: string;
+  resolvedDay?: FestivalDay;
+} {
   const target = resolveArtist(query, context);
   if (!target) {
     if (hasPronoun(query)) {
@@ -899,6 +1055,8 @@ export function handleNextOnStage(query: string, context?: AnswerContext): { res
         `Nothing listed after them in the current data.`,
       ].join("\n"),
       resolvedArtist: target.artist_name,
+      resolvedStage: target.stage,
+      resolvedDay: target.day as FestivalDay,
     };
   }
   return {
@@ -907,10 +1065,17 @@ export function handleNextOnStage(query: string, context?: AnswerContext): { res
       `${next.artist_name} — ${formatTime(next.start_time)}–${formatTime(next.end_time)}`,
     ].join("\n"),
     resolvedArtist: next.artist_name,
+    resolvedStage: next.stage,
+    resolvedDay: next.day as FestivalDay,
   };
 }
 
-export function handlePrevOnStage(query: string, context?: AnswerContext): { response: string; resolvedArtist?: string } {
+export function handlePrevOnStage(query: string, context?: AnswerContext): {
+  response: string;
+  resolvedArtist?: string;
+  resolvedStage?: string;
+  resolvedDay?: FestivalDay;
+} {
   const target = resolveArtist(query, context);
   if (!target) {
     if (hasPronoun(query)) {
@@ -930,6 +1095,8 @@ export function handlePrevOnStage(query: string, context?: AnswerContext): { res
         `Nothing listed before them in the current data.`,
       ].join("\n"),
       resolvedArtist: target.artist_name,
+      resolvedStage: target.stage,
+      resolvedDay: target.day as FestivalDay,
     };
   }
   return {
@@ -938,6 +1105,8 @@ export function handlePrevOnStage(query: string, context?: AnswerContext): { res
       `${prev.artist_name} — ${formatTime(prev.start_time)}–${formatTime(prev.end_time)}`,
     ].join("\n"),
     resolvedArtist: prev.artist_name,
+    resolvedStage: prev.stage,
+    resolvedDay: prev.day as FestivalDay,
   };
 }
 
@@ -970,8 +1139,16 @@ export function handleConflictLookup(query: string, context?: AnswerContext): { 
   };
 }
 
-export function handleDayLookup(query: string): { response: string; pending?: PendingDisambiguation } {
-  const days = findDays(query);
+export function handleDayLookup(query: string, context?: AnswerContext): {
+  response: string;
+  pending?: PendingDisambiguation;
+  resolvedDay?: FestivalDay;
+} {
+  let days = findDays(query);
+  // Day-pronoun ("that day" / "same day" / "then") resolves via lastDay.
+  if (days.length === 0 && hasDayPronoun(query) && context?.lastDay) {
+    days = [context.lastDay];
+  }
   if (days.length === 0) {
     return { response: "I couldn't figure out which day. Try 'Thursday', 'first Friday', or 'Sat May 2'." };
   }
@@ -991,9 +1168,10 @@ export function handleDayLookup(query: string): { response: string; pending?: Pe
   const sets = artists
     .filter((a) => a.day === day)
     .sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time));
-  if (sets.length === 0) return { response: `No sets listed for ${day}.` };
+  if (sets.length === 0) return { response: `No sets listed for ${day}.`, resolvedDay: day };
   return {
     response: [`${day} lineup:`, ...sets.map((a) => `• ${formatTime(a.start_time)} — ${a.artist_name} (${a.stage})`)].join("\n"),
+    resolvedDay: day,
   };
 }
 
@@ -1204,6 +1382,37 @@ export function handleCulturalLookup(query: string): { response: string; pending
 // ---- FAQ ----
 
 export function handleFaqLookup(query: string): string {
+  // Festival-hours shortcut: answer with gate times scoped to the requested
+  // day when possible. Falls back to the full Dates & Hours FAQ otherwise.
+  const normQuery = norm(query);
+  if (isFestivalHoursQuery(normQuery)) {
+    const days = findDays(query);
+    // "today" / "tonight" with no festival day → say so explicitly.
+    if (/\btoday\b|\btonight\b/.test(normQuery) && days.length === 0) {
+      return "Today isn't a festival day. Jazz Fest 2026 runs Thu Apr 23 – Sun Apr 26 and Thu Apr 30 – Sun May 3. Gates open at 11 AM and close at 7 PM on fest days.";
+    }
+    if (days.length === 1) {
+      const asksClose = /\b(close|closes|closed|closing|end|ends|ending|over|done|finish|finishes|finished)\b/.test(
+        normQuery,
+      );
+      const asksOpen = /\b(start|starts|begin|begins|open|opens|opening)\b/.test(
+        normQuery,
+      );
+      if (asksClose && !asksOpen) {
+        return `${days[0]}: gates close at 7 PM.`;
+      }
+      if (asksOpen && !asksClose) {
+        return `${days[0]}: gates open at 11 AM.`;
+      }
+      return `${days[0]}: gates open at 11 AM, close at 7 PM.`;
+    }
+    // No day pinned — return the full Dates & Hours FAQ.
+    const hours = faqs.find((f) => f.topic === "Dates & Hours");
+    if (hours) {
+      return [`${hours.topic} — ${hours.question}`, "", hours.answer].join("\n");
+    }
+  }
+
   const best = scoreFaq(query);
   if (!best) {
     return "I don't have a FAQ entry for that. Try asking about tickets, parking, the shuttle, cashless payment, accessibility, or lost & found.";
@@ -1341,6 +1550,62 @@ function resolveDayFromReply(reply: string, options: FestivalDay[]): FestivalDay
   return null;
 }
 
+// ---- Follow-up query rewriting ----
+
+// Connectors that flag a short reply as a follow-up ("and Saturday?",
+// "how about tomorrow?"). Stripped from the rewritten query so the result
+// reads as a natural full question.
+const FOLLOWUP_CONNECTOR_RE = /^\s*(and|how about|what about|same|then|also|or)\b\s*/i;
+
+// When the user sends a short follow-up like "and Saturday?" or "tomorrow?"
+// after having talked about a specific artist or stage, synthesize a full
+// query by carrying the previous subject forward. Re-routed through answer()
+// so the normal handlers do the heavy lifting.
+//
+// Guardrails:
+//   - Short queries only (≤ 3 words, or ≤ 6 with a follow-up connector).
+//   - Must introduce a concrete day (not just "that day").
+//   - Must NOT already name an artist (that's a subject change).
+//   - Original query must classify to `unknown` or `day_lookup` — anything
+//     more specific already has a good answer on its own.
+function maybeRewriteFollowUp(query: string, context?: AnswerContext): string | null {
+  if (!context?.lastArtist && !context?.lastStage) return null;
+
+  const q = norm(query);
+  const wordCount = q ? q.split(" ").filter(Boolean).length : 0;
+  if (wordCount === 0) return null;
+
+  const connectorLead = FOLLOWUP_CONNECTOR_RE.test(query);
+  const isShort = wordCount <= 3;
+  if (!connectorLead && !isShort) return null;
+  if (wordCount > 6) return null;
+
+  // Don't rewrite if the query already names an artist — that's a fresh subject.
+  if (findArtist(q)) return null;
+
+  // Only rewrite when the query brings a concrete day reference.
+  // Day-pronouns ("that day") are resolved elsewhere via lastDay.
+  const hasConcreteDay = findDays(query).length > 0;
+  if (!hasConcreteDay) return null;
+
+  // Skip rewrite if the original query already classifies to something
+  // specific — only rewrite the low-information cases.
+  const baseIntent = classify(query);
+  if (baseIntent !== "unknown" && baseIntent !== "day_lookup") return null;
+
+  const stripped = query.replace(FOLLOWUP_CONNECTOR_RE, "").trim();
+  if (!stripped) return null;
+
+  // Prefer artist-anchored rewrite (more specific than stage).
+  if (context.lastArtist) {
+    return `when is ${context.lastArtist} playing ${stripped}`;
+  }
+  if (context.lastStage) {
+    return `who is on ${context.lastStage} ${stripped}`;
+  }
+  return null;
+}
+
 // ---- Top-level route ----
 
 export function answer(query: string, context?: AnswerContext): AnswerResult {
@@ -1371,12 +1636,21 @@ export function answer(query: string, context?: AnswerContext): AnswerResult {
     // Neither worked — fall through and treat `trimmed` as a fresh query.
   }
 
+  // Follow-up rewrite: a short reply like "and Saturday?" or "tomorrow?"
+  // after we've been talking about an artist/stage is re-expanded into a
+  // full question and re-routed. Keeps short-form conversation natural
+  // without introducing an LLM.
+  const rewritten = maybeRewriteFollowUp(trimmed, context);
+  if (rewritten && rewritten !== trimmed) {
+    return answer(rewritten, context);
+  }
+
   const intent = classify(trimmed);
   switch (intent) {
     case "now_playing":
       return { intent, response: handleNowPlaying(trimmed) };
     case "stage_lookup":
-      return { intent, ...handleStageLookup(trimmed) };
+      return { intent, ...handleStageLookup(trimmed, context) };
     case "artist_bio":
       return { intent, ...handleArtistBio(trimmed) };
     case "artist_lookup":
@@ -1384,7 +1658,7 @@ export function answer(query: string, context?: AnswerContext): AnswerResult {
     case "food_lookup":
       return { intent, response: handleFoodLookup(trimmed) };
     case "day_lookup":
-      return { intent, ...handleDayLookup(trimmed) };
+      return { intent, ...handleDayLookup(trimmed, context) };
     case "next_on_stage":
       return { intent, ...handleNextOnStage(trimmed, context) };
     case "prev_on_stage":

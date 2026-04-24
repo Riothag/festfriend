@@ -76,6 +76,13 @@ export interface AnswerContext {
   // The last artist the assistant talked about, used to resolve pronouns
   // like "them", "they", "that band" in follow-up questions.
   lastArtist?: string;
+  // The last stage the assistant resolved (either because the user asked
+  // about it directly, or because the last artist plays there). Lets
+  // follow-ups like "what's next there?" or "on that stage" work.
+  lastStage?: string;
+  // The last day the assistant resolved. Lets follow-ups like
+  // "and Saturday?" or "same day?" work.
+  lastDay?: FestivalDay;
   // If the previous turn asked a follow-up ("which day?"), this carries
   // the options and original query so a short reply like "23" or "first" works.
   pending?: PendingDisambiguation;
@@ -87,6 +94,10 @@ export interface AnswerResult {
   // If the response is artist-specific, the client stores this as the new
   // conversation "lastArtist" for follow-up queries.
   resolvedArtist?: string;
+  // Stage the handler resolved (if any). Client stores as lastStage.
+  resolvedStage?: string;
+  // Day the handler resolved (if any). Client stores as lastDay.
+  resolvedDay?: FestivalDay;
   // If the handler asked a follow-up question, client stashes this and sends
   // it back on the next turn as context.pending.
   pending?: PendingDisambiguation;

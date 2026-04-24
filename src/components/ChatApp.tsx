@@ -1,7 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { ChatMessage as TChatMessage, PendingDisambiguation } from "@/types";
+import type {
+  ChatMessage as TChatMessage,
+  FestivalDay,
+  PendingDisambiguation,
+} from "@/types";
 import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
 import QuickActions from "./QuickActions";
@@ -13,6 +17,10 @@ export default function ChatApp() {
   const [loading, setLoading] = useState(false);
   // Remembered across turns so "who is after them?" works.
   const lastArtistRef = useRef<string | null>(null);
+  // Stage last resolved — powers "what's next there?" / "that stage".
+  const lastStageRef = useRef<string | null>(null);
+  // Day last resolved — powers "same day?" / "that day".
+  const lastDayRef = useRef<FestivalDay | null>(null);
   // Carries a pending follow-up question (e.g. "which Thursday?") so a short
   // reply like "23" resolves to the right day.
   const pendingRef = useRef<PendingDisambiguation | null>(null);
@@ -37,6 +45,8 @@ export default function ChatApp() {
         body: JSON.stringify({
           message: text,
           lastArtist: lastArtistRef.current ?? undefined,
+          lastStage: lastStageRef.current ?? undefined,
+          lastDay: lastDayRef.current ?? undefined,
           pending: pendingRef.current ?? undefined,
         }),
       });
@@ -46,6 +56,12 @@ export default function ChatApp() {
       const data = await res.json();
       if (typeof data?.resolvedArtist === "string") {
         lastArtistRef.current = data.resolvedArtist;
+      }
+      if (typeof data?.resolvedStage === "string") {
+        lastStageRef.current = data.resolvedStage;
+      }
+      if (typeof data?.resolvedDay === "string") {
+        lastDayRef.current = data.resolvedDay as FestivalDay;
       }
       // Stash any new pending follow-up, or clear the previous one if the
       // server consumed it.
@@ -136,7 +152,7 @@ export default function ChatApp() {
       <div className="border-t border-gray-200 bg-white px-4 py-3 pb-[max(env(safe-area-inset-bottom),0.75rem)]">
         <ChatInput onSend={send} disabled={loading} />
         <p className="mt-2 text-center text-[10px] text-gray-500">
-          Made with ❤️ from Lisa LaCour at{" "}
+          Made with ❤️ by Lisa LaCour at{" "}
           <a
             href="https://thevaultcollective.co"
             target="_blank"

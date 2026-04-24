@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { answer } from "@/lib/intent";
-import type { AnswerContext, PendingDisambiguation } from "@/types";
+import { festivalDays } from "@/data/festival";
+import type { AnswerContext, FestivalDay, PendingDisambiguation } from "@/types";
 
 export const runtime = "nodejs";
 
@@ -15,16 +16,31 @@ function isValidPending(p: unknown): p is PendingDisambiguation {
   );
 }
 
+const VALID_DAYS: Set<string> = new Set(festivalDays.map((d) => d.day));
+
+function parseFestivalDay(value: unknown): FestivalDay | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return VALID_DAYS.has(trimmed) ? (trimmed as FestivalDay) : undefined;
+}
+
+function parseString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json().catch(() => ({}));
     const message: string = typeof body?.message === "string" ? body.message : "";
-    const lastArtist: string | undefined =
-      typeof body?.lastArtist === "string" && body.lastArtist.trim()
-        ? body.lastArtist.trim()
-        : undefined;
-    const pending = isValidPending(body?.pending) ? body.pending : undefined;
-    const context: AnswerContext = { lastArtist, pending };
+    const context: AnswerContext = {
+      lastArtist: parseString(body?.lastArtist),
+      lastStage: parseString(body?.lastStage),
+      lastDay: parseFestivalDay(body?.lastDay),
+      pending: isValidPending(body?.pending) ? body.pending : undefined,
+    };
     const result = answer(message, context);
     return Response.json(result);
   } catch {
