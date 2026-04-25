@@ -756,6 +756,47 @@ function isFoodRecommendationQuery(normQuery: string): boolean {
   return NORMED_FOOD_RECS.some((p) => normQuery.includes(p));
 }
 
+// "Surprise me" is a discovery flow. Phrases that should trigger it.
+const SURPRISE_PHRASES = [
+  "surprise me", "surprise",
+  "what should i do", "what to do",
+  "anything cool", "something cool", "show me something",
+  "hidden gem", "hidden gems",
+  "i m bored", "im bored", "i am bored",
+  "discover", "discovery",
+  "off the beaten path",
+  "show me a surprise",
+];
+const NORMED_SURPRISE = SURPRISE_PHRASES.map(norm).filter(Boolean);
+
+function isSurpriseQuery(normQuery: string): boolean {
+  // Whole-word boundaries so "surprise" doesn't match inside other words.
+  return NORMED_SURPRISE.some((p) =>
+    new RegExp(`\\b${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(normQuery),
+  );
+}
+
+// Detect whether the user picked food / music / culture. Used both inside
+// the surprise handler and to resolve a pending category prompt.
+type SurpriseCategory = "food" | "music" | "culture";
+
+function detectSurpriseCategory(normQuery: string): SurpriseCategory | null {
+  if (/\b(food|eat|hungry|snack|drink|drinks|bite|bites|taste)\b/.test(normQuery)) {
+    return "food";
+  }
+  if (/\b(music|band|bands|artist|artists|song|songs|set|sets|show|shows)\b/.test(normQuery)) {
+    return "music";
+  }
+  if (
+    /\b(culture|cultural|folklife|folk\s*life|exhibit|exhibits|exhibition|demo|demos|demonstration|craft|crafts|heritage|tradition|traditions)\b/.test(
+      normQuery,
+    )
+  ) {
+    return "culture";
+  }
+  return null;
+}
+
 // FAQ relevance scoring — returns the best FAQ, or null. Uses word-boundary
 // matching so "hat" doesn't hit inside "what" and "where" doesn't always fire.
 function scoreFaq(query: string): { faq: FAQ; score: number } | null {
@@ -788,9 +829,15 @@ export function classify(query: string): Intent {
   //    get hijacked by the stage_lookup fallback.
   if (NORMED_CULTURAL.some((p) => q.includes(p))) return "cultural_lookup";
 
+  // 0.15. SURPRISE ME — discovery flow. Routes to a curated surprise across
+  //       food, music, or cultural programming (preferring hidden gems over
+  //       headliners). Checked before food_recommendations so "surprise me"
+  //       takes precedence over "what's good".
+  if (isSurpriseQuery(q)) return "surprise_me";
+
   // 0.2. FOOD RECOMMENDATIONS — open-ended hunger ("i'm hungry", "what
-  //      should i eat", "surprise me"). Surfaces curated must-try picks
-  //      instead of dead-ending in unknown.
+  //      should i eat"). Surfaces curated must-try picks instead of
+  //      dead-ending in unknown.
   if (isFoodRecommendationQuery(q)) return "food_recommendations";
 
   // 0.25. FESTIVAL HOURS — "what time does jazz fest start", "when do gates
@@ -1866,6 +1913,177 @@ const POPULAR_FOOD_PICKS: { vendorMatch: string; foodItem: string }[] = [
   { vendorMatch: "Cafe du Monde", foodItem: "Beignets" },
 ];
 
+// ---- Surprise me ----
+
+// Vendor names already in the popular-picks list. Excluded from food surprises
+// so we surface lesser-known finds instead of repeating the obvious.
+const POPULAR_VENDOR_NAMES_LOWER = new Set(
+  POPULAR_FOOD_PICKS.map((p) => p.vendorMatch.toLowerCase()),
+);
+
+// Stages where "headliners" play. Excluded from music surprises so we
+// surface smaller-stage discoveries instead.
+const HEADLINER_STAGES_FOR_SURPRISE = new Set([
+  "Festival Stage",
+  "Shell Gentilly Stage",
+  "Congo Square Stage",
+]);
+
+function pickRandom<T>(items: T[]): T | null {
+  if (items.length === 0) return null;
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function surpriseFood(): string {
+  // Prefer Food Heritage Stage demos happening today (live cooking demos
+  // are the prototypical "hidden gem" Lisa called out). Then fall back to
+  // lesser-known vendors not in the popular picks.
+  const today = getFestivalNow().day;
+  if (today) {
+    const heritageToday = artists.filter(
+      (a) => a.stage === "Food Heritage Stage" && a.day === today,
+    );
+    const heritageUpcoming = heritageToday.filter(
+      (a) => toMinutes(a.end_time) >= getFestivalNow().minutes,
+    );
+    const pool = heritageUpcoming.length > 0 ? heritageUpcoming : heritageToday;
+    const pick = pickRandom(pool);
+    if (pick) {
+      const dayLabel = formatRelativeDay(pick.day as FestivalDay);
+      return [
+        `🍴 Hidden gem: live cooking demo at the Food Heritage Stage.`,
+        ``,
+        `${pick.artist_name}`,
+        `${dayLabel} · ${formatTime(pick.start_time)}–${formatTime(pick.end_time)}`,
+        `Food Heritage Stage`,
+      ].join("\n");
+    }
+  }
+  // Fallback: a lesser-known vendor.
+  const candidates = vendors.filter(
+    (v) =>
+      !Array.from(POPULAR_VENDOR_NAMES_LOWER).some((p) =>
+        v.vendor_name.toLowerCase().includes(p),
+      ),
+  );
+  const pick = pickRandom(candidates);
+  if (!pick) return "Try the Food Heritage Stage — live cooking demos every day.";
+  return [
+    `🍴 Off the beaten path:`,
+    ``,
+    `${pick.vendor_name}`,
+    `${pick.location_description}`,
+    `Try: ${pick.food_items.slice(0, 3).join(", ")}`,
+  ].join("\n");
+}
+
+function surpriseMusic(): string {
+  // Prefer something happening NOW or NEXT on a non-headliner stage today.
+  const { day, minutes } = getFestivalNow();
+  if (day) {
+    const liveOffTheBeatenPath = artists
+      .filter(
+        (a) =>
+          a.day === day &&
+          !HEADLINER_STAGES_FOR_SURPRISE.has(a.stage) &&
+          toMinutes(a.start_time) <= minutes &&
+          toMinutes(a.end_time) > minutes &&
+          a.stage !== "Food Heritage Stage", // food handled separately
+      );
+    const upcoming = artists
+      .filter(
+        (a) =>
+          a.day === day &&
+          !HEADLINER_STAGES_FOR_SURPRISE.has(a.stage) &&
+          toMinutes(a.start_time) > minutes &&
+          a.stage !== "Food Heritage Stage",
+      )
+      .sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time))
+      .slice(0, 6);
+    const pool = liveOffTheBeatenPath.length > 0 ? liveOffTheBeatenPath : upcoming;
+    const pick = pickRandom(pool);
+    if (pick) {
+      const isLive =
+        toMinutes(pick.start_time) <= minutes && toMinutes(pick.end_time) > minutes;
+      const verb = isLive ? "Playing right now" : "Up next";
+      return [
+        `🎵 Off the main stage:`,
+        ``,
+        `${pick.artist_name}`,
+        `${verb} · ${formatTime(pick.start_time)}–${formatTime(pick.end_time)}`,
+        `${pick.stage}`,
+      ].join("\n");
+    }
+  }
+  // Fallback: any non-headliner act.
+  const fallback = pickRandom(
+    artists.filter(
+      (a) =>
+        !HEADLINER_STAGES_FOR_SURPRISE.has(a.stage) &&
+        a.stage !== "Food Heritage Stage",
+    ),
+  );
+  if (!fallback) return "Wander to a smaller stage — that's where Jazz Fest hides its best secrets.";
+  return [
+    `🎵 Worth checking out:`,
+    ``,
+    `${fallback.artist_name}`,
+    `${formatRelativeDay(fallback.day as FestivalDay)} · ${formatTime(fallback.start_time)}–${formatTime(fallback.end_time)}`,
+    `${fallback.stage}`,
+  ].join("\n");
+}
+
+function surpriseCulture(): string {
+  // Prefer demos on the active weekend. Heritage = high-discovery, low-traffic.
+  const today = getFestivalNow().day;
+  const weekend1Days = new Set<string>(["Thu Apr 23", "Fri Apr 24", "Sat Apr 25", "Sun Apr 26"]);
+  const activeWeekend: "1" | "2" | null = today
+    ? weekend1Days.has(today)
+      ? "1"
+      : "2"
+    : null;
+  const pool = activeWeekend
+    ? demos.filter((d) => d.weekend === activeWeekend || d.weekend === "both")
+    : demos;
+  const pick = pickRandom(pool);
+  if (!pick) {
+    return "Try the Folklife Village or the Cultural Exchange Pavilion — easy to miss, hard to forget.";
+  }
+  const tag = pick.sub_area ? ` (${pick.sub_area})` : "";
+  return [
+    `🎨 Discovery worth a detour:`,
+    ``,
+    `${pick.name}`,
+    `${pick.area}${tag}`,
+    `${pick.description}`,
+  ].join("\n");
+}
+
+const SURPRISE_CATEGORY_PROMPT = [
+  "Pick your flavor:",
+  "• Food",
+  "• Music",
+  "• Culture",
+  "",
+  "Reply with one — I'll surface a hidden gem.",
+].join("\n");
+
+export function handleSurpriseMe(query: string): {
+  response: string;
+  pending?: PendingDisambiguation;
+} {
+  const cat = detectSurpriseCategory(norm(query));
+  if (!cat) {
+    return {
+      response: SURPRISE_CATEGORY_PROMPT,
+      pending: { kind: "surprise" },
+    };
+  }
+  if (cat === "food") return { response: surpriseFood() };
+  if (cat === "music") return { response: surpriseMusic() };
+  return { response: surpriseCulture() };
+}
+
 export function handleFoodRecommendations(): string {
   const lines: string[] = ["Must-try Jazz Fest food:"];
   let added = 0;
@@ -1994,6 +2212,17 @@ export function answer(query: string, context?: AnswerContext): AnswerResult {
     return { intent: "unknown", response: "Ask me about an artist, a stage, a day, a genre, what's on now, or where to find food." };
   }
 
+  // Resolve a pending surprise-category prompt from the previous turn.
+  if (context?.pending?.kind === "surprise") {
+    const cat = detectSurpriseCategory(norm(trimmed));
+    if (cat) {
+      const result = handleSurpriseMe(trimmed);
+      return { intent: "surprise_me", ...result };
+    }
+    // Reply doesn't look like a category — clear pending and treat as a
+    // fresh query so the user isn't stuck.
+  }
+
   // Resolve a pending day-disambiguation from the previous turn.
   if (context?.pending?.kind === "day") {
     const { pending: _p, ...rest } = context;
@@ -2039,6 +2268,8 @@ export function answer(query: string, context?: AnswerContext): AnswerResult {
       return { intent, response: handleFoodLookup(trimmed) };
     case "food_recommendations":
       return { intent, response: handleFoodRecommendations() };
+    case "surprise_me":
+      return { intent, ...handleSurpriseMe(trimmed) };
     case "day_lookup":
       return { intent, ...handleDayLookup(trimmed, context) };
     case "next_on_stage":

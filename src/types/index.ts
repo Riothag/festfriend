@@ -63,15 +63,15 @@ export type Intent =
   | "cultural_lookup"
   | "faq_lookup"
   | "headliner_lookup"
+  | "surprise_me"
   | "unknown";
 
-// When a handler asks a follow-up question (e.g. "which Thursday?"),
-// it returns a PendingDisambiguation so the next turn can resolve it.
-export interface PendingDisambiguation {
-  kind: "day";
-  options: FestivalDay[];
-  originalQuery: string;
-}
+// When a handler asks a follow-up question (e.g. "which Thursday?",
+// "food, music, or culture?"), it returns a PendingDisambiguation so the
+// next turn can resolve it. Discriminated union — add new kinds as needed.
+export type PendingDisambiguation =
+  | { kind: "day"; options: FestivalDay[]; originalQuery: string }
+  | { kind: "surprise" };
 
 export interface AnswerContext {
   // The last artist the assistant talked about, used to resolve pronouns

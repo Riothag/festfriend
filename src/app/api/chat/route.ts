@@ -8,12 +8,15 @@ export const runtime = "nodejs";
 function isValidPending(p: unknown): p is PendingDisambiguation {
   if (!p || typeof p !== "object") return false;
   const o = p as Record<string, unknown>;
-  return (
-    o.kind === "day" &&
-    Array.isArray(o.options) &&
-    o.options.every((x) => typeof x === "string") &&
-    typeof o.originalQuery === "string"
-  );
+  if (o.kind === "day") {
+    return (
+      Array.isArray(o.options) &&
+      o.options.every((x) => typeof x === "string") &&
+      typeof o.originalQuery === "string"
+    );
+  }
+  if (o.kind === "surprise") return true;
+  return false;
 }
 
 const VALID_DAYS: Set<string> = new Set(festivalDays.map((d) => d.day));

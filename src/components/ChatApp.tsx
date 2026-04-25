@@ -146,7 +146,20 @@ export default function ChatApp() {
               { id: `a-${Date.now()}`, role: "assistant", text: prompt },
             ])
           }
+          onSurprise={() => send("surprise me")}
         />
+      )}
+
+      {!empty && (
+        <div className="px-4 pb-2 pt-1 flex items-center justify-center">
+          <button
+            onClick={() => send("surprise me")}
+            disabled={loading}
+            className="rounded-full bg-yellow-400 text-black text-xs font-bold px-4 py-1.5 active:scale-[0.97] disabled:opacity-50"
+          >
+            ✨ Surprise me
+          </button>
+        </div>
       )}
 
       <div className="border-t border-gray-200 bg-white px-4 py-3 pb-[max(env(safe-area-inset-bottom),0.75rem)]">
