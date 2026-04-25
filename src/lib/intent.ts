@@ -5,6 +5,7 @@ import { vendors } from "@/data/vendors";
 import { festivalDays, festivalTimezone } from "@/data/festival";
 import { demos } from "@/data/cultural_programs";
 import { faqs } from "@/data/faqs";
+import { recommendations, type Recommendation } from "@/data/recommendations";
 
 // Music schedule + cooking demos merged. Both conform to the Artist shape.
 const artists = [...scheduleArtists, ...foodHeritageDemos];
@@ -26,6 +27,12 @@ function correctVoiceTypos(query: string): string {
   // Apostrophe-y "playint" / "playin" → "playing"
   s = s.replace(/\bplayint\b/gi, "playing");
   s = s.replace(/\bplayin\b/gi, "playing");
+  // Po-boy variants → "po boy" (canonical for our food-item tokens). Catches
+  // "poboy", "poboys", "po-boy", "po-boys" so all three render the same.
+  s = s.replace(/\bpoboys\b/gi, "po boys");
+  s = s.replace(/\bpoboy\b/gi, "po boy");
+  s = s.replace(/\bpo-boys\b/gi, "po boys");
+  s = s.replace(/\bpo-boy\b/gi, "po boy");
   return s;
 }
 
@@ -780,6 +787,47 @@ function isSurpriseQuery(normQuery: string): boolean {
 // the surprise handler and to resolve a pending category prompt.
 type SurpriseCategory = "food" | "music" | "culture";
 
+// Subjective qualifiers that signal "give me an opinion / editor pick"
+// rather than a literal lookup.
+const SUBJECTIVE_QUALIFIER_RE =
+  /\b(best|favorite|favourite|must\s?try|must\s?eat|must\s?have|must\s?see|cant\s?miss|can\s?t\s?miss|top|iconic|famous|recommend|recommended|highly\s?recommend|standout|standouts|killer|legendary|crushing|underrated|hidden|sleeper)\b/;
+
+// Map subjective categories. Order matters — first match wins, so put more
+// specific phrases first.
+const REC_CATEGORY_RULES: { keywords: RegExp; category: string }[] = [
+  { keywords: /\b(po\s?boy|poboy|po\s?boys|poboys)\b/, category: "po-boy" },
+  { keywords: /\b(rib|ribs)\b/, category: "ribs" },
+  { keywords: /\b(oyster|oysters)\b/, category: "oysters" },
+  { keywords: /\b(gumbo)\b/, category: "gumbo" },
+  { keywords: /\b(beignet|beignets|praline|pralines|sweet|sweets|dessert|desserts)\b/, category: "dessert" },
+  { keywords: /\b(drink|drinks|cocktail|cocktails|booze|alcohol|punch)\b/, category: "drink" },
+  { keywords: /\b(crawfish|crawdad|crawdads)\b/, category: "crawfish" },
+  { keywords: /\b(taco|tacos)\b/, category: "tacos" },
+  { keywords: /\b(soup|stew|stews|bisque)\b/, category: "soup" },
+  { keywords: /\b(jamaican|caribbean|jamaica)\b/, category: "jamaican" },
+  { keywords: /\b(duck)\b/, category: "duck" },
+  { keywords: /\b(boudin)\b/, category: "boudin" },
+  { keywords: /\b(pork|pig|cochon|swine)\b/, category: "pork" },
+  { keywords: /\b(seafood|fish)\b/, category: "seafood" },
+  { keywords: /\b(vegetarian|vegan|veggie)\b/, category: "vegetarian-friendly" },
+  { keywords: /\b(appetizer|appetizers|small\s?plate|small\s?plates|snack|snacks|bite|bites|share|sharing)\b/, category: "appetizer" },
+  { keywords: /\b(band|bands|act|acts|artist|artists|set|sets|show|shows|music)\b/, category: "music" },
+  // Generic catch-alls — must be last so specific categories win.
+  { keywords: /\b(food|eat|dish|dishes|meal|plate|plates)\b/, category: "must-try" },
+];
+
+function detectRecCategory(normQuery: string): string | null {
+  for (const { keywords, category } of REC_CATEGORY_RULES) {
+    if (keywords.test(normQuery)) return category;
+  }
+  return null;
+}
+
+function isSubjectiveQuery(normQuery: string): boolean {
+  if (!SUBJECTIVE_QUALIFIER_RE.test(normQuery)) return false;
+  return detectRecCategory(normQuery) !== null;
+}
+
 function detectSurpriseCategory(normQuery: string): SurpriseCategory | null {
   if (/\b(food|eat|hungry|snack|drink|drinks|bite|bites|taste)\b/.test(normQuery)) {
     return "food";
@@ -834,6 +882,12 @@ export function classify(query: string): Intent {
   //       headliners). Checked before food_recommendations so "surprise me"
   //       takes precedence over "what's good".
   if (isSurpriseQuery(q)) return "surprise_me";
+
+  // 0.18. SUBJECTIVE RECOMMENDATIONS — "best ribs", "must try po-boy",
+  //       "can't miss band today". Pulls from a curated editor-pick dataset
+  //       (Ian McNulty + crowd favorites). Requires both a qualifier word
+  //       AND a category noun, otherwise falls through to food_recs / others.
+  if (isSubjectiveQuery(q)) return "subjective_recommendation";
 
   // 0.2. FOOD RECOMMENDATIONS — open-ended hunger ("i'm hungry", "what
   //      should i eat"). Surfaces curated must-try picks instead of
@@ -1913,6 +1967,91 @@ const POPULAR_FOOD_PICKS: { vendorMatch: string; foodItem: string }[] = [
   { vendorMatch: "Cafe du Monde", foodItem: "Beignets" },
 ];
 
+// ---- Subjective recommendations ("best X" / "must try Y" / "can't miss") ----
+
+function recLine(r: Recommendation): string[] {
+  return [
+    `• ${r.title} — ${r.vendor} (${r.location})`,
+    `  ${r.reason}`,
+    `  Source: ${r.source}`,
+  ];
+}
+
+function shuffle<T>(arr: T[]): T[] {
+  const out = [...arr];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+function handleCantMissMusic(): string {
+  const today = getFestivalNow().day;
+  // Three biggest stages — that's where the universally agreed "can't miss"
+  // headliners play. Take the latest set on each.
+  const mustStages = ["Festival Stage", "Shell Gentilly Stage", "Congo Square Stage"];
+  if (today) {
+    const picks = mustStages
+      .map((stageName) => {
+        const sets = artists
+          .filter((a) => a.day === today && a.stage === stageName)
+          .sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time));
+        return sets[sets.length - 1];
+      })
+      .filter(Boolean);
+    if (picks.length > 0) {
+      const lines: string[] = [`🎵 Can't-miss bands today (${today}):`, ""];
+      for (const p of picks) {
+        lines.push(
+          `• ${p.artist_name} — ${p.stage}, ${formatTime(p.start_time)}–${formatTime(p.end_time)}`,
+        );
+      }
+      return lines.join("\n");
+    }
+  }
+  return "Today's not a festival day. The 2026 marquee names: Stevie Nicks, Lorde, Tyler Childers, Sean Paul, Nas, Big Freedia, Pearl Jam, and Jon Batiste — check each day's headliners.";
+}
+
+export function handleSubjectiveRecommendation(query: string): { response: string } {
+  const q = norm(query);
+  const category = detectRecCategory(q);
+
+  // Music subjective queries route to today's headliners.
+  if (category === "music") {
+    return { response: handleCantMissMusic() };
+  }
+
+  // Filter recommendations by category. If we have specific category picks,
+  // use them. Otherwise fall back to a random rotation of the full list so
+  // the user still gets a real answer.
+  let picks: Recommendation[] = category
+    ? recommendations.filter((r) => r.categories.includes(category))
+    : [];
+  let usedFallback = false;
+  if (picks.length === 0) {
+    picks = recommendations;
+    usedFallback = true;
+  }
+
+  // Shuffle so repeat asks return varied picks. Cap at 3.
+  const top = shuffle(picks).slice(0, 3);
+
+  const headerCategory = category && category !== "must-try" ? category : null;
+  const header = headerCategory
+    ? `Top picks — ${headerCategory}:`
+    : `Top picks:`;
+  const lines: string[] = [header, ""];
+  for (const r of top) {
+    lines.push(...recLine(r));
+    lines.push("");
+  }
+  if (usedFallback && category) {
+    lines.push(`No editor pick for "${category}" specifically — these are festival favorites.`);
+  }
+  return { response: lines.join("\n").trimEnd() };
+}
+
 // ---- Surprise me ----
 
 // Vendor names already in the popular-picks list. Excluded from food surprises
@@ -2281,6 +2420,8 @@ export function answer(query: string, context?: AnswerContext): AnswerResult {
       return { intent, response: handleFoodRecommendations() };
     case "surprise_me":
       return { intent, ...handleSurpriseMe(trimmed) };
+    case "subjective_recommendation":
+      return { intent, ...handleSubjectiveRecommendation(trimmed) };
     case "day_lookup":
       return { intent, ...handleDayLookup(trimmed, context) };
     case "next_on_stage":

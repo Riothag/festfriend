@@ -64,6 +64,7 @@ export type Intent =
   | "faq_lookup"
   | "headliner_lookup"
   | "surprise_me"
+  | "subjective_recommendation"
   | "unknown";
 
 // When a handler asks a follow-up question (e.g. "which Thursday?",
