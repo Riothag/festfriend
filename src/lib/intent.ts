@@ -828,6 +828,17 @@ function isSubjectiveQuery(normQuery: string): boolean {
   return detectRecCategory(normQuery) !== null;
 }
 
+// Specific food-item keywords. When one of these appears in the query, the
+// user is asking about an actual edible thing — vendor lookup should beat
+// any incidental artist match (e.g. a Food Heritage Stage demo whose title
+// includes the same word).
+const FOOD_ITEM_KEYWORDS_RE =
+  /\b(crawfish|po\s?boy|poboy|gumbo|beignet|beignets|jambalaya|ya\s?ka\s?mein|yakamein|mango\s+freeze|cochon|muffuletta|rib|ribs|oyster|oysters|boudin|etouffee|étouffée|remoulade|praline|pralines|shrimp|alligator|andouille|jerk|enchilada|strudel|sack|patty|patties|po\s+boys?|jambalaya|gyro|tacos?|wings?|fries|fried\s+chicken|catfish|crawdad|crawdads|stew|bisque|chowder|tamale|tamales|empanada|empanadas)\b/;
+
+function hasFoodItemKeyword(normQuery: string): boolean {
+  return FOOD_ITEM_KEYWORDS_RE.test(normQuery);
+}
+
 function detectSurpriseCategory(normQuery: string): SurpriseCategory | null {
   if (/\b(food|eat|hungry|snack|drink|drinks|bite|bites|taste)\b/.test(normQuery)) {
     return "food";
@@ -986,8 +997,19 @@ export function classify(query: string): Intent {
   // 12. FOOD — but defer to artist_lookup if the query names a specific
   //     artist. "Where is Stevie Nicks playing" is asking about her stage,
   //     not a food vendor.
+  //
+  //     Counter-rule: when the artist match is a Food Heritage Stage cooking
+  //     demo AND the query mentions a food-item keyword (crawfish, gumbo,
+  //     etc.), prefer vendor lookup. "Where is the crawfish bread" should
+  //     return Panaroma Foods, not John Malone's demo whose title happens
+  //     to contain "crawfish" and "bread".
   if (NORMED_FOOD.some((p) => q.includes(p))) {
-    if (findArtist(q)) return "artist_lookup";
+    const artistMatch = findArtist(q);
+    if (artistMatch) {
+      const isFoodHeritageDemo = artistMatch.stage === "Food Heritage Stage";
+      if (isFoodHeritageDemo && hasFoodItemKeyword(q)) return "food_lookup";
+      return "artist_lookup";
+    }
     return "food_lookup";
   }
 
