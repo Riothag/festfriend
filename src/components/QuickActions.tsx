@@ -16,12 +16,6 @@ export default function QuickActions({
 }) {
   return (
     <div className="px-4 pb-3 space-y-2">
-      <button
-        onClick={onSurprise}
-        className="w-full rounded-xl bg-yellow-400 text-black text-sm font-bold py-3 px-3 active:scale-[0.98] active:bg-yellow-500"
-      >
-        ✨ Surprise me
-      </button>
       <div className="grid grid-cols-2 gap-2">
         {BUTTONS.map((b) => (
           <button
@@ -32,6 +26,16 @@ export default function QuickActions({
             {b.label}
           </button>
         ))}
+      </div>
+      <div className="grid grid-cols-4 gap-2">
+        <div />
+        <button
+          onClick={onSurprise}
+          className="col-span-2 rounded-xl bg-yellow-400 text-black text-sm font-bold py-3 px-3 active:scale-[0.98] active:bg-yellow-500"
+        >
+          ✨ Surprise me
+        </button>
+        <div />
       </div>
     </div>
   );
