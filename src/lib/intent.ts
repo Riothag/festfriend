@@ -29,11 +29,15 @@ function correctVoiceTypos(query: string): string {
   return s;
 }
 
-// Singularize a token ending in "s" when it's long enough that we're
-// confident it's a real plural (not "Nas" / "ribs" / "boys" — which we want
-// to keep for exact match). Used to bridge "meat pies" → "meat pie".
+// Singularize a token. Threshold is length ≥ 4 so "pies" → "pie" and
+// "wings" → "wing" both work, while "Nas" (3) is preserved. Handles the
+// common -ies → -ie pattern explicitly. Only used in food matching, so
+// false positives (e.g. "fries" → "frie") don't affect artist resolution.
 function singularize(t: string): string {
-  if (t.length > 4 && t.endsWith("s") && !t.endsWith("ss")) return t.slice(0, -1);
+  if (t.length >= 5 && t.endsWith("ies")) return t.slice(0, -3) + "ie";
+  if (t.length >= 4 && t.endsWith("s") && !t.endsWith("ss") && !t.endsWith("us")) {
+    return t.slice(0, -1);
+  }
   return t;
 }
 
@@ -257,6 +261,24 @@ function findStage(query: string): Stage | null {
       const found = stages.find((s) => s.stage_name === stage);
       if (found) return found;
     }
+  }
+  // (4) Token-overlap fallback. "economy tent" → Economy Hall Tent because
+  //     {economy, tent} is a subset of {economy, hall, tent}. Requires the
+  //     query to bring at least one DISTINCTIVE (not "stage" / "tent") token
+  //     so generic words alone don't match a random stage.
+  const qWords = q.split(" ").filter((w) => w.length >= 3);
+  if (qWords.length >= 1) {
+    const candidates = stages
+      .map((s) => {
+        const sn = norm(s.stage_name);
+        const sWords = sn.split(" ").filter((w) => w.length >= 3);
+        const matches = qWords.filter((w) => sWords.includes(w));
+        const distinctive = matches.filter((w) => w !== "stage" && w !== "tent" && w !== "hall");
+        return { stage: s, matchCount: matches.length, distinctive: distinctive.length, sWordCount: sWords.length };
+      })
+      .filter((c) => c.distinctive >= 1 && c.matchCount >= Math.min(2, c.sWordCount))
+      .sort((a, b) => b.matchCount - a.matchCount);
+    if (candidates.length > 0) return candidates[0].stage;
   }
   return null;
 }
@@ -891,6 +913,19 @@ function festivalDayIndex(day: string): number {
   return i === -1 ? 99 : i;
 }
 
+// Convert a festival day to a friendly relative label based on today.
+// "Sat Apr 25" → "Today (Sat Apr 25)" if today is Apr 25, etc. Falls back
+// to the bare day name if today isn't a festival day or the diff is > 1.
+function formatRelativeDay(day: FestivalDay): string {
+  const today = getFestivalNow().day;
+  if (!today) return day;
+  const diff = festivalDayIndex(day) - festivalDayIndex(today);
+  if (diff === 0) return `Today (${day})`;
+  if (diff === 1) return `Tomorrow (${day})`;
+  if (diff === -1) return `Yesterday (${day})`;
+  return day;
+}
+
 function artistLine(a: Artist) {
   return `• ${a.artist_name} — ${a.day}, ${formatTime(a.start_time)}–${formatTime(a.end_time)} on ${a.stage}`;
 }
@@ -995,24 +1030,52 @@ function preferTodayWhenSameArtist(matches: Artist[]): Artist[] {
 function artistNotOnDayResponse(
   matches: Artist[],
   requestedDays: FestivalDay[],
-): { response: string; resolvedArtist?: string } {
-  const dayLabel = requestedDays.length === 1 ? requestedDays[0] : "that day";
-  // Sort other sets by festival day order so "next" is meaningful.
-  const others = [...matches].sort(
+): { response: string; resolvedArtist?: string; resolvedStage?: string; resolvedDay?: FestivalDay } {
+  const today = getFestivalNow().day;
+  const todayIdx = today ? festivalDayIndex(today) : -1;
+  // Chronological. Drop past sets relative to today — users at the festival
+  // don't care about a set that already happened.
+  const sorted = [...matches].sort(
     (a, b) => festivalDayIndex(a.day) - festivalDayIndex(b.day),
   );
-  const name = others[0].artist_name;
-  const lines = [`${name} isn't playing ${dayLabel}.`];
-  if (others.length === 1) {
-    const a = others[0];
-    lines.push(
-      `Playing ${a.day}, ${formatTime(a.start_time)}–${formatTime(a.end_time)} on ${a.stage}.`,
-    );
-  } else {
-    lines.push("Other sets:");
-    lines.push(...others.map(disambiguationLine));
+  const upcoming =
+    todayIdx >= 0
+      ? sorted.filter((a) => festivalDayIndex(a.day) >= todayIdx)
+      : sorted;
+
+  const dayLabel =
+    requestedDays.length === 1 ? formatRelativeDay(requestedDays[0]) : "that day";
+  const name = sorted[0].artist_name;
+
+  if (upcoming.length === 0) {
+    return {
+      response: `${name} isn't playing ${dayLabel}. Their sets at this fest already happened.`,
+      resolvedArtist: name,
+    };
   }
-  return { response: lines.join("\n"), resolvedArtist: name };
+
+  const next = upcoming[0];
+  const nextDayLabel = formatRelativeDay(next.day as FestivalDay);
+  const lines = [
+    `${name} isn't playing ${dayLabel}.`,
+    `Next set: ${nextDayLabel}, ${formatTime(next.start_time)}–${formatTime(next.end_time)} on ${next.stage}.`,
+  ];
+  if (upcoming.length > 1) {
+    lines.push("");
+    lines.push("Other upcoming sets:");
+    lines.push(
+      ...upcoming.slice(1).map(
+        (a) =>
+          `• ${formatRelativeDay(a.day as FestivalDay)}, ${formatTime(a.start_time)}–${formatTime(a.end_time)} on ${a.stage}`,
+      ),
+    );
+  }
+  return {
+    response: lines.join("\n"),
+    resolvedArtist: name,
+    resolvedStage: next.stage,
+    resolvedDay: next.day as FestivalDay,
+  };
 }
 
 // Reject overly-broad queries that produce a sea of matches. Most real
@@ -1066,15 +1129,18 @@ export function handleArtistLookup(query: string): {
   const a = matches[0];
   if (!a) return { response: noArtistFound(query) };
   const normQ = norm(query);
+  // Strict literal verbs only — don't conflate "when does" / "what time"
+  // (general time questions) with "start". The user asked when the set
+  // ENDS; lead with the end time.
   const asksEnd = /\b(end|ends|ending|over|done|finish|finishes|until|till)\b/.test(normQ);
-  const asksStart = /\b(start|starts|begin|begins|when does|when is|what time)\b/.test(normQ);
-  // If the user specifically asked when the set ends, lead with the end time.
+  const asksStart = /\b(start|starts|starting|begin|begins|beginning)\b/.test(normQ);
+  const dayLabel = formatRelativeDay(a.day as FestivalDay);
   if (asksEnd && !asksStart) {
     return {
       response: [
         `${a.artist_name}`,
         `Ends at ${formatTime(a.end_time)}`,
-        `${a.day} · ${formatTime(a.start_time)}–${formatTime(a.end_time)}`,
+        `${dayLabel} · ${formatTime(a.start_time)}–${formatTime(a.end_time)}`,
         `${a.stage}`,
       ].join("\n"),
       resolvedArtist: a.artist_name,
@@ -1085,7 +1151,7 @@ export function handleArtistLookup(query: string): {
   return {
     response: [
       `${a.artist_name}`,
-      `${a.day} · ${formatTime(a.start_time)}–${formatTime(a.end_time)}`,
+      `${dayLabel} · ${formatTime(a.start_time)}–${formatTime(a.end_time)}`,
       `${a.stage}`,
     ].join("\n"),
     resolvedArtist: a.artist_name,
@@ -1127,13 +1193,14 @@ export function handleArtistBio(query: string): {
   }
   const a = matches[0];
   if (!a) return { response: noArtistFound(query) };
+  const dayLabel = formatRelativeDay(a.day as FestivalDay);
   return {
     response: [
       `${a.artist_name} (${a.genre})`,
       "",
       a.bio,
       "",
-      `Playing ${a.day}, ${formatTime(a.start_time)}–${formatTime(a.end_time)} on ${a.stage}.`,
+      `Playing ${dayLabel}, ${formatTime(a.start_time)}–${formatTime(a.end_time)} on ${a.stage}.`,
     ].join("\n"),
     resolvedArtist: a.artist_name,
     resolvedStage: a.stage,
