@@ -1935,31 +1935,10 @@ function pickRandom<T>(items: T[]): T | null {
 }
 
 function surpriseFood(): string {
-  // Prefer Food Heritage Stage demos happening today (live cooking demos
-  // are the prototypical "hidden gem" Lisa called out). Then fall back to
-  // lesser-known vendors not in the popular picks.
-  const today = getFestivalNow().day;
-  if (today) {
-    const heritageToday = artists.filter(
-      (a) => a.stage === "Food Heritage Stage" && a.day === today,
-    );
-    const heritageUpcoming = heritageToday.filter(
-      (a) => toMinutes(a.end_time) >= getFestivalNow().minutes,
-    );
-    const pool = heritageUpcoming.length > 0 ? heritageUpcoming : heritageToday;
-    const pick = pickRandom(pool);
-    if (pick) {
-      const dayLabel = formatRelativeDay(pick.day as FestivalDay);
-      return [
-        `🍴 Hidden gem: live cooking demo at the Food Heritage Stage.`,
-        ``,
-        `${pick.artist_name}`,
-        `${dayLabel} · ${formatTime(pick.start_time)}–${formatTime(pick.end_time)}`,
-        `Food Heritage Stage`,
-      ].join("\n");
-    }
-  }
-  // Fallback: a lesser-known vendor.
+  // Food = real food vendors only. Cooking demos at the Food Heritage Stage
+  // are reorganized under "culture" (they're discovery/educational, not
+  // someone you can buy a plate from). Excludes the popular picks so we
+  // surface lesser-known finds.
   const candidates = vendors.filter(
     (v) =>
       !Array.from(POPULAR_VENDOR_NAMES_LOWER).some((p) =>
@@ -1967,7 +1946,9 @@ function surpriseFood(): string {
       ),
   );
   const pick = pickRandom(candidates);
-  if (!pick) return "Try the Food Heritage Stage — live cooking demos every day.";
+  if (!pick) {
+    return "No vendor surprises right now — try crawfish bread, crawfish monica, or a mango freeze.";
+  }
   return [
     `🍴 Off the beaten path:`,
     ``,
@@ -2034,18 +2015,48 @@ function surpriseMusic(): string {
 }
 
 function surpriseCulture(): string {
-  // Prefer demos on the active weekend. Heritage = high-discovery, low-traffic.
-  const today = getFestivalNow().day;
+  // Two pools merge here:
+  //   (a) Folklife Village + Cultural Exchange Pavilion demos (the demos data)
+  //   (b) Food Heritage Stage cooking demos today (educational, not vending)
+  // Picked roughly 50/50 when both have content, so the surprise feels varied.
+  const { day, minutes } = getFestivalNow();
   const weekend1Days = new Set<string>(["Thu Apr 23", "Fri Apr 24", "Sat Apr 25", "Sun Apr 26"]);
-  const activeWeekend: "1" | "2" | null = today
-    ? weekend1Days.has(today)
+  const activeWeekend: "1" | "2" | null = day
+    ? weekend1Days.has(day)
       ? "1"
       : "2"
     : null;
-  const pool = activeWeekend
+  const culturalDemos = activeWeekend
     ? demos.filter((d) => d.weekend === activeWeekend || d.weekend === "both")
     : demos;
-  const pick = pickRandom(pool);
+
+  const heritageToday = day
+    ? artists.filter((a) => a.stage === "Food Heritage Stage" && a.day === day)
+    : [];
+  const heritageUpcoming = heritageToday.filter(
+    (a) => toMinutes(a.end_time) >= minutes,
+  );
+  const heritagePool = heritageUpcoming.length > 0 ? heritageUpcoming : heritageToday;
+
+  const preferHeritage =
+    heritagePool.length > 0 &&
+    (culturalDemos.length === 0 || Math.random() < 0.5);
+
+  if (preferHeritage) {
+    const pick = pickRandom(heritagePool);
+    if (pick) {
+      const dayLabel = formatRelativeDay(pick.day as FestivalDay);
+      return [
+        `🎨 Live cooking demo at the Food Heritage Stage:`,
+        ``,
+        `${pick.artist_name}`,
+        `${dayLabel} · ${formatTime(pick.start_time)}–${formatTime(pick.end_time)}`,
+        `Food Heritage Stage`,
+      ].join("\n");
+    }
+  }
+
+  const pick = pickRandom(culturalDemos);
   if (!pick) {
     return "Try the Folklife Village or the Cultural Exchange Pavilion — easy to miss, hard to forget.";
   }
