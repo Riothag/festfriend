@@ -28,11 +28,14 @@ function correctVoiceTypos(query: string): string {
   s = s.replace(/\bplayint\b/gi, "playing");
   s = s.replace(/\bplayin\b/gi, "playing");
   // Po-boy variants → "po boy" (canonical for our food-item tokens). Catches
-  // "poboy", "poboys", "po-boy", "po-boys" so all three render the same.
+  // "poboy", "poboys", "po-boy", "po-boys", "poor boy", "poor boys" — all
+  // common phrasings of the same sandwich.
   s = s.replace(/\bpoboys\b/gi, "po boys");
   s = s.replace(/\bpoboy\b/gi, "po boy");
   s = s.replace(/\bpo-boys\b/gi, "po boys");
   s = s.replace(/\bpo-boy\b/gi, "po boy");
+  s = s.replace(/\bpoor\s+boys\b/gi, "po boys");
+  s = s.replace(/\bpoor\s+boy\b/gi, "po boy");
   return s;
 }
 
