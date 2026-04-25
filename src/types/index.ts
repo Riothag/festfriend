@@ -52,6 +52,7 @@ export type Intent =
   | "stage_lookup"
   | "now_playing"
   | "food_lookup"
+  | "food_recommendations"
   | "artist_bio"
   | "day_lookup"
   | "next_on_stage"

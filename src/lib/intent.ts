@@ -13,6 +13,30 @@ import type { AnswerContext, AnswerResult, Artist, Demo, FAQ, FestivalDay, Inten
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
 
+// Voice-to-text and autocorrect cleanup. Applied before any other processing
+// so downstream rules see the corrected query. Intentionally conservative —
+// only fixes patterns we've actually seen in real query logs.
+function correctVoiceTypos(query: string): string {
+  let s = query;
+  // "tente" / "tents" → "tent" (autocorrect on "tent" producing French diacritic forms)
+  s = s.replace(/\btente\b/gi, "tent");
+  s = s.replace(/\btents\b/gi, "tent");
+  // "X 10" where X is a stage prefix → "X tent" (voice mishears "tent" as "10")
+  s = s.replace(/\b(gospel|jazz|blues|economy|economy hall|kids|wwoz)\s+10\b/gi, "$1 tent");
+  // Apostrophe-y "playint" / "playin" → "playing"
+  s = s.replace(/\bplayint\b/gi, "playing");
+  s = s.replace(/\bplayin\b/gi, "playing");
+  return s;
+}
+
+// Singularize a token ending in "s" when it's long enough that we're
+// confident it's a real plural (not "Nas" / "ribs" / "boys" — which we want
+// to keep for exact match). Used to bridge "meat pies" → "meat pie".
+function singularize(t: string): string {
+  if (t.length > 4 && t.endsWith("s") && !t.endsWith("ss")) return t.slice(0, -1);
+  return t;
+}
+
 // Common words we never want to match on for fuzzy artist/genre matching.
 const STOPWORDS = new Set([
   "the", "and", "for", "who", "what", "when", "where", "why", "how",
@@ -61,23 +85,28 @@ function editDistance(a: string, b: string): number {
 // — e.g. "main" must NOT fuzzy-match "pain".
 function fuzzyTokenMatch(qt: string, at: string): boolean {
   if (qt === at) return true;
-  if (qt.length < 4 || at.length < 4) return false;
+  // Allow short fuzzy matches (e.g. "naz" → "nas") with strict budget.
+  if (qt.length < 3 || at.length < 3) return false;
   // Require the first character to agree. Most typos preserve the leading
   // letter, and this rejects coincidental overlaps like "main" / "pain".
   if (qt[0] !== at[0]) return false;
   if (Math.abs(qt.length - at.length) > 2) return false;
   const longer = Math.max(qt.length, at.length);
-  const budget = longer >= 7 ? 2 : 1;
+  // Length-scaled budget: 1 for ≤6 chars, 2 for 7+, 3 for 9+.
+  // Keeps "naz" → "nas" (1 edit) while letting "frida" → "freedia" (3 edits)
+  // resolve at the longer length.
+  const budget = longer >= 9 ? 3 : longer >= 7 ? 2 : 1;
   return editDistance(qt, at) <= budget;
 }
 
 // ---- Lookups ----
 
 // Words that look like they could match an artist name via substring but are
-// really day/time indicators. Bare queries of these words should NOT resolve
-// to an artist (e.g. "friday" shouldn't match "Kevin Louis & The Friday Night
-// Jazz Band"). They still match when embedded in a longer query that
-// legitimately contains an artist name.
+// really day/time indicators or generic terms. Bare queries of these words
+// should NOT resolve to an artist (e.g. "friday" shouldn't match "Kevin
+// Louis & The Friday Night Jazz Band"; "now" shouldn't match "Knowles").
+// They still match when embedded in a longer query that legitimately
+// contains an artist name.
 const BARE_NON_ARTIST_WORDS = new Set([
   "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
   "mon", "tues", "wed", "thu", "thur", "thurs", "fri", "sat", "sun",
@@ -86,21 +115,31 @@ const BARE_NON_ARTIST_WORDS = new Set([
   "first", "second", "last",
   "morning", "afternoon", "evening", "night",
   "weekend",
+  // Generic words that substring-collide with artist names.
+  "now", "all", "any", "some", "show", "list", "everyone", "anything",
+  "thing", "things", "time", "stuff", "next", "before", "after",
 ]);
 
 function scoreArtists(query: string): { artist: Artist; score: number }[] {
   const q = norm(query);
   if (!q) return [];
-  // Reject bare day/time words up front — they'd substring-match too loosely.
+  // Reject bare day/time/generic words up front — they substring-match too
+  // loosely (e.g. "now" inside "Knowles", "all" inside "Allstars").
   if (BARE_NON_ARTIST_WORDS.has(q)) return [];
   // Exact
   const exact = artists.filter((a) => norm(a.artist_name) === q).map((a) => ({ artist: a, score: 100 }));
   if (exact.length > 0) return exact;
-  // Substring (full query inside name, or short name inside query)
+  // Substring (full query inside name, or short name inside query).
+  // For short queries (< 4 chars), require word-boundary match to avoid
+  // accidental hits like "now" → "Knowles".
   const substring = artists
     .filter((a) => {
       const name = norm(a.artist_name);
-      return name.includes(q) || (q.length >= 4 && q.includes(name));
+      if (q.length >= 4) {
+        return name.includes(q) || q.includes(name);
+      }
+      // Short query: word-boundary inside the name only.
+      return new RegExp(`\\b${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(name);
     })
     .map((a) => ({ artist: a, score: 50 }));
   if (substring.length > 0) return substring;
@@ -117,11 +156,13 @@ function scoreArtists(query: string): { artist: Artist; score: number }[] {
       scored.push({ artist: a, score: overlap * 2 });
       continue;
     }
-    // Fuzzy fallback. Require ALL of the artist's tokens to be matched by
-    // some query token — otherwise "main" fuzzy-matching "pain" would pull
-    // in T-Pain from a query like "main act on the main stage". For
-    // single-token artists, additionally require a short query so we don't
-    // grab artists out of long unrelated sentences.
+    // Fuzzy fallback. Two ways to qualify:
+    //   (1) All artist tokens fuzzy-match a query token (high confidence).
+    //   (2) For multi-token artist names, a query that's just one
+    //       distinctive token may match the LONGEST artist token alone —
+    //       this lets "Fredia" → "Big Freedia" without making short queries
+    //       hit too liberally. Requires the matched token to be ≥5 chars
+    //       (so "Big" or "The" wouldn't qualify on their own).
     const matchedArtistTokens = aTokens.filter((at) =>
       qTokens.some((qt) => fuzzyTokenMatch(qt, at)),
     ).length;
@@ -131,6 +172,18 @@ function scoreArtists(query: string): { artist: Artist; score: number }[] {
       } else if (qTokens.length <= 2) {
         scored.push({ artist: a, score: 1 });
       }
+    } else if (
+      qTokens.length === 1 &&
+      aTokens.length >= 2 &&
+      matchedArtistTokens >= 1
+    ) {
+      // Single-token query, multi-token artist: accept if the matched
+      // artist token is meaningful in length (not "Big", "The", etc.).
+      const matchedTokens = aTokens.filter((at) =>
+        qTokens.some((qt) => fuzzyTokenMatch(qt, at)),
+      );
+      const meaningful = matchedTokens.find((t) => t.length >= 5);
+      if (meaningful) scored.push({ artist: a, score: 1 });
     }
   }
   return scored.sort((a, b) => b.score - a.score);
@@ -303,7 +356,10 @@ function findVendorsByFood(query: string): Vendor[] {
   if (!q) return [];
   const hasWord = (needle: string) => needle && new RegExp(`\\b${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(q);
 
+  // Singularize for plural-aware overlap. Keep the raw tokens too so
+  // word-boundary checks against original strings still work.
   const qTokens = tokens(q);
+  const qTokensSingular = qTokens.map(singularize);
 
   type Scored = { vendor: Vendor; score: number };
   const scored: Scored[] = [];
@@ -340,8 +396,10 @@ function findVendorsByFood(query: string): Vendor[] {
         // Token overlap with the food item's meaningful words.
         // e.g. "pheasant gumbo" shares {pheasant, gumbo} with
         // "Pheasant Quail and Andouille Gumbo" → stronger than plain "gumbo".
+        // Compare singular forms so "meat pies" matches "Meat Pie".
         const foodTokens = words.filter((t) => t.length > 2 && !GENERIC_FOOD_TOKENS.has(t));
-        const overlap = qTokens.filter((t) => foodTokens.includes(t)).length;
+        const foodTokensSingular = foodTokens.map(singularize);
+        const overlap = qTokensSingular.filter((t) => foodTokensSingular.includes(t)).length;
         if (overlap >= 2) {
           score = Math.max(score, 85);
         } else if (overlap === 1 && qTokens.length <= 2 && foodTokens.length >= 1) {
@@ -350,10 +408,25 @@ function findVendorsByFood(query: string): Vendor[] {
           // "Apple Pie"). Mild but real signal — multiple vendors can tie here
           // and the user gets a list.
           score = Math.max(score, 65);
+        } else if (
+          overlap === 0 &&
+          qTokens.length <= 2 &&
+          foodTokens.length >= 1
+        ) {
+          // Last-chance: "meat pies" → "Meat Pie" — strict overlap fails
+          // because "meat" is in GENERIC_FOOD_TOKENS. Try matching against
+          // the FULL words list (incl. generics) once we've singularized.
+          const allWordsSingular = words.map(singularize);
+          const looseOverlap = qTokensSingular.filter((t) =>
+            allWordsSingular.includes(t),
+          ).length;
+          if (looseOverlap >= 2) score = Math.max(score, 70);
         }
       } else {
         // Single-word food item — only counts if it's non-generic.
-        if (!GENERIC_FOOD_TOKENS.has(nf) && hasWord(nf)) {
+        // Singular-form word-boundary check so "pies" → "pie".
+        const nfSingular = singularize(nf);
+        if (!GENERIC_FOOD_TOKENS.has(nf) && (hasWord(nf) || hasWord(nfSingular))) {
           score = Math.max(score, 70);
         }
       }
@@ -574,6 +647,19 @@ const FAQ_QUESTION_STARTERS = [
 
 // ---- Classification ----
 
+// Bare queries that should resolve to "now playing" — short, contextless
+// phrases people send mid-festival. Whole-query exact match only, so they
+// don't hijack longer queries like "who is playing on Festival Stage".
+const BARE_NOW_QUERIES = new Set(
+  [
+    "now", "right now",
+    "who is playing", "whos playing", "who s playing",
+    "what is playing", "whats playing", "what s playing",
+    "who is on", "whos on", "who s on",
+    "what s on", "whats on",
+  ].map(norm).filter(Boolean),
+);
+
 // Pre-normalize phrase lists so "who's after" (with apostrophe) compares
 // correctly against the normed query (which strips apostrophes).
 const NORMED_NOW = NOW_PHRASES.map(norm).filter(Boolean);
@@ -591,12 +677,10 @@ const NORMED_CULTURAL = CULTURAL_PHRASES.map(norm).filter(Boolean);
 const NORMED_FAQ_STARTERS = FAQ_QUESTION_STARTERS.map(norm).filter(Boolean);
 
 // Detects questions about the festival's own schedule — gate open/close,
-// "when does it start today", "what time does the fest end", etc. The
-// festival subject can be explicit ("fest", "festival", "jazz fest",
-// "gates") or implicit ("it" / "its" when no artist or stage is mentioned).
-//
-// Paired with a time word ("when", "what time", "hours") and an hours verb
-// ("start", "open", "close", "end", "over", "run", "finish").
+// "what time does the fest end", "when do gates open", etc.
+// REQUIRES an explicit festival reference ("fest", "festival", "jazz fest",
+// "gates", "doors"). Implicit "it" is NOT routed here — those queries are
+// ambiguous and resolve via the now/next default during festival days.
 function isFestivalHoursQuery(normQuery: string): boolean {
   const hasTimeWord =
     /\b(when|what\s+time)\b/.test(normQuery) || /\bhours?\b/.test(normQuery);
@@ -606,14 +690,48 @@ function isFestivalHoursQuery(normQuery: string): boolean {
       normQuery,
     );
   if (!hasHoursVerb) return false;
-  const explicitFestival =
-    /\b(fest|festival|jazz\s*fest|gates?|doors?)\b/.test(normQuery);
-  if (explicitFestival) return true;
-  // Implicit "it" — only treat as festival-reference when no competing
-  // subject is present (no artist and no stage in the query).
+  return /\b(fest|festival|jazz\s*fest|gates?|doors?)\b/.test(normQuery);
+}
+
+// Catches ambiguous "what's happening" / "what time does it start" / "what's
+// going on" queries with no specific subject. During a festival day these
+// should default to now-or-next-today rather than festival hours or
+// artist_lookup. Outside a festival day they fall through to the FAQ.
+function isAmbiguousTimeQuery(normQuery: string): boolean {
+  // "what's happening", "what's going on", "anything happening"
+  if (/\b(whats|what s)\s+(happening|going on)\b/.test(normQuery)) return true;
+  if (/\banything\s+(happening|going on)\b/.test(normQuery)) return true;
+  // "what time does it (start|begin|open)" / "when does it (start|begin)"
+  // — implicit "it" with hours-verb, no specific subject.
   const hasIt = /\b(it|its)\b/.test(normQuery);
   if (!hasIt) return false;
+  const asksHours =
+    /\b(start|starts|begin|begins|open|opens|opening|happening)\b/.test(normQuery);
+  if (!asksHours) return false;
+  const hasTimeWord = /\b(when|what\s+time)\b/.test(normQuery);
+  if (!hasTimeWord) return false;
+  // Ambiguous only when no competing subject is present.
   return !findArtist(normQuery) && !findStage(normQuery);
+}
+
+// Curated phrases that signal open-ended hunger / food discovery.
+const FOOD_RECOMMENDATION_PHRASES = [
+  "i m hungry", "im hungry", "i am hungry",
+  "what should i eat", "what should i get",
+  "food recommendations", "food recommendation", "food suggestions", "food suggestion",
+  "recommend food", "recommend a food",
+  "surprise me", "what s good", "whats good", "what s good to eat", "whats good to eat",
+  "best food", "must try", "must try food", "must try foods",
+  "famous food", "famous foods", "iconic food", "iconic foods",
+  "top food", "top foods", "top picks", "top pick",
+  "i don t know what i want", "i dont know what i want",
+  "what food should i get", "what food should i eat",
+  "what to eat", "things to eat",
+];
+const NORMED_FOOD_RECS = FOOD_RECOMMENDATION_PHRASES.map(norm).filter(Boolean);
+
+function isFoodRecommendationQuery(normQuery: string): boolean {
+  return NORMED_FOOD_RECS.some((p) => normQuery.includes(p));
 }
 
 // FAQ relevance scoring — returns the best FAQ, or null. Uses word-boundary
@@ -648,12 +766,22 @@ export function classify(query: string): Intent {
   //    get hijacked by the stage_lookup fallback.
   if (NORMED_CULTURAL.some((p) => q.includes(p))) return "cultural_lookup";
 
-  // 0.25. FESTIVAL HOURS — "when does it start today", "what time does the
-  //       fest open", "when do gates open", "is the festival over".
-  //       Routes to faq_lookup, where handleFaqLookup detects this shape and
-  //       returns gate hours (optionally scoped to a day). Must run BEFORE
-  //       the time-phrase → artist_lookup branch.
+  // 0.2. FOOD RECOMMENDATIONS — open-ended hunger ("i'm hungry", "what
+  //      should i eat", "surprise me"). Surfaces curated must-try picks
+  //      instead of dead-ending in unknown.
+  if (isFoodRecommendationQuery(q)) return "food_recommendations";
+
+  // 0.25. FESTIVAL HOURS — "what time does jazz fest start", "when do gates
+  //       open", "is the festival over". Explicit festival reference only.
+  //       Implicit "it" is NOT routed here (see ambiguous-time below).
   if (isFestivalHoursQuery(q)) return "faq_lookup";
+
+  // 0.26. AMBIGUOUS TIME — "what time does it start", "what's happening".
+  //       During a festival day → now_playing. Off-day → festival hours FAQ.
+  if (isAmbiguousTimeQuery(q)) {
+    const { day } = getFestivalNow();
+    return day ? "now_playing" : "faq_lookup";
+  }
 
   // 0.5. FAQ — strong match runs EARLY so "is jazz fest cashless" doesn't
   //      get hijacked by the "jazz" genre token. Two triggers:
@@ -682,6 +810,9 @@ export function classify(query: string): Intent {
 
   // 3. NOW — "who's playing now"
   if (NORMED_NOW.some((p) => q.includes(p))) return "now_playing";
+
+  // 3a. Bare-now exact-match: "Now", "Who is playing", "What's on" alone.
+  if (BARE_NOW_QUERIES.has(q)) return "now_playing";
 
   // 3b. STAGE-PRONOUN — "what's next there?", "anything on that stage Sunday?".
   //     Resolved in handleStageLookup against context.lastStage. Only fires
@@ -729,8 +860,13 @@ export function classify(query: string): Intent {
     return findArtist(q) ? "artist_bio" : "unknown";
   }
 
-  // 12. FOOD
-  if (NORMED_FOOD.some((p) => q.includes(p))) return "food_lookup";
+  // 12. FOOD — but defer to artist_lookup if the query names a specific
+  //     artist. "Where is Stevie Nicks playing" is asking about her stage,
+  //     not a food vendor.
+  if (NORMED_FOOD.some((p) => q.includes(p))) {
+    if (findArtist(q)) return "artist_lookup";
+    return "food_lookup";
+  }
 
   // 12. Fallbacks
   if (findArtist(q)) return "artist_lookup";
@@ -769,8 +905,56 @@ function artistLineCompact(a: Artist, opts: { hideDay?: boolean; hideStage?: boo
   return `• ${parts.join(" · ")}`;
 }
 
-function noArtistFound(query: string) {
-  return `I can't find that artist. Try a full name like "Trombone Shorty" or "Stevie Nicks". Your query: "${query}".`;
+// Find the closest artist guess by edit distance against full names AND
+// individual name tokens. Used to drive "Did you mean X?" suggestions when
+// strict matching fails. Returns null if nothing comes within budget.
+function findClosestArtistGuess(query: string): Artist | null {
+  const q = norm(query);
+  if (!q || q.length < 3) return null;
+  if (BARE_NON_ARTIST_WORDS.has(q)) return null;
+
+  const qTokens = q.split(" ").filter((t) => t.length >= 3);
+  if (qTokens.length === 0) return null;
+
+  let best: { artist: Artist; score: number } | null = null;
+  for (const a of artists) {
+    const name = norm(a.artist_name);
+    const nameTokens = name.split(" ").filter((t) => t.length >= 3);
+
+    // (a) Best token-pair edit distance, normalized by length.
+    let bestTokenScore = Infinity;
+    for (const qt of qTokens) {
+      for (const nt of nameTokens) {
+        if (qt[0] !== nt[0]) continue; // first-letter agreement
+        if (Math.abs(qt.length - nt.length) > 3) continue;
+        const d = editDistance(qt, nt);
+        const longer = Math.max(qt.length, nt.length);
+        // Normalize: distance / longer. Lower is better.
+        const normalized = d / longer;
+        if (normalized < bestTokenScore) bestTokenScore = normalized;
+      }
+    }
+
+    // (b) Full-name distance (caps the score in the noisy long-name case).
+    const fullDistance = q.length >= 4 ? editDistance(q, name) / Math.max(q.length, name.length) : Infinity;
+
+    const combined = Math.min(bestTokenScore, fullDistance);
+    if (combined === Infinity) continue;
+    if (!best || combined < best.score) {
+      best = { artist: a, score: combined };
+    }
+  }
+  // Threshold: 0.5 normalized distance — roughly "half the chars match".
+  // Empirically catches "Frida"→"Freedia" (0.43), "Naz"→"Nas" (0.33),
+  // and rejects unrelated noise.
+  if (best && best.score <= 0.5) return best.artist;
+  return null;
+}
+
+function noArtistFound(query: string): string {
+  const guess = findClosestArtistGuess(query);
+  if (guess) return `I didn't catch that — did you mean ${guess.artist_name}?`;
+  return "I'm not finding that one. Try an artist name, stage name, or food item.";
 }
 
 function disambiguationLine(a: Artist) {
@@ -793,6 +977,19 @@ function filterMatchesByDay(
     filtered: matches.filter((a) => daySet.has(a.day as FestivalDay)),
     requestedDays: days,
   };
+}
+
+// When multiple matches all refer to the same artist (e.g. Big Freedia plays
+// twice over the two weekends), prefer today's set if the user didn't pin
+// a day. "Is Big Freedia playing?" mid-festival reads as "playing today?".
+function preferTodayWhenSameArtist(matches: Artist[]): Artist[] {
+  if (matches.length <= 1) return matches;
+  const uniqueNames = new Set(matches.map((m) => m.artist_name));
+  if (uniqueNames.size > 1) return matches;
+  const today = getFestivalNow().day;
+  if (!today) return matches;
+  const todayMatches = matches.filter((a) => a.day === today);
+  return todayMatches.length >= 1 ? todayMatches : matches;
 }
 
 function artistNotOnDayResponse(
@@ -818,6 +1015,19 @@ function artistNotOnDayResponse(
   return { response: lines.join("\n"), resolvedArtist: name };
 }
 
+// Reject overly-broad queries that produce a sea of matches. Most real
+// users don't want a 40-line dump — they want to refine.
+function isOverlyBroadQuery(query: string, matches: Artist[]): boolean {
+  const q = norm(query);
+  const wordCount = q ? q.split(" ").filter(Boolean).length : 0;
+  // Single-word queries that pulled in 11+ matches are almost always too
+  // generic to be useful (e.g. "all", "show", "any", "new").
+  return wordCount <= 1 && matches.length > 10;
+}
+
+const BROAD_QUERY_RESPONSE =
+  "That's a broad one — try an artist name, stage, or food item. Examples: \"Lorde\", \"Festival Stage\", \"Mango Freeze\".";
+
 export function handleArtistLookup(query: string): {
   response: string;
   resolvedArtist?: string;
@@ -825,12 +1035,24 @@ export function handleArtistLookup(query: string): {
   resolvedDay?: FestivalDay;
 } {
   let matches = findArtists(query);
+  if (isOverlyBroadQuery(query, matches)) {
+    return { response: BROAD_QUERY_RESPONSE };
+  }
   const dayFilter = filterMatchesByDay(query, matches);
   if (dayFilter) {
     if (dayFilter.filtered.length === 0 && matches.length > 0) {
       return artistNotOnDayResponse(matches, dayFilter.requestedDays);
     }
     matches = dayFilter.filtered;
+  } else if (matches.length > 1) {
+    // No explicit day in the query. If all matches are the same artist
+    // playing multiple festival days and one of them is today, prefer
+    // today's set — at the festival "is X playing?" almost always means
+    // "is X playing today?".
+    matches = preferTodayWhenSameArtist(matches);
+  }
+  if (matches.length > 10) {
+    return { response: BROAD_QUERY_RESPONSE };
   }
   if (matches.length > 1) {
     return {
@@ -843,6 +1065,23 @@ export function handleArtistLookup(query: string): {
   }
   const a = matches[0];
   if (!a) return { response: noArtistFound(query) };
+  const normQ = norm(query);
+  const asksEnd = /\b(end|ends|ending|over|done|finish|finishes|until|till)\b/.test(normQ);
+  const asksStart = /\b(start|starts|begin|begins|when does|when is|what time)\b/.test(normQ);
+  // If the user specifically asked when the set ends, lead with the end time.
+  if (asksEnd && !asksStart) {
+    return {
+      response: [
+        `${a.artist_name}`,
+        `Ends at ${formatTime(a.end_time)}`,
+        `${a.day} · ${formatTime(a.start_time)}–${formatTime(a.end_time)}`,
+        `${a.stage}`,
+      ].join("\n"),
+      resolvedArtist: a.artist_name,
+      resolvedStage: a.stage,
+      resolvedDay: a.day as FestivalDay,
+    };
+  }
   return {
     response: [
       `${a.artist_name}`,
@@ -862,12 +1101,20 @@ export function handleArtistBio(query: string): {
   resolvedDay?: FestivalDay;
 } {
   let matches = findArtists(query);
+  if (isOverlyBroadQuery(query, matches)) {
+    return { response: BROAD_QUERY_RESPONSE };
+  }
   const dayFilter = filterMatchesByDay(query, matches);
   if (dayFilter) {
     if (dayFilter.filtered.length === 0 && matches.length > 0) {
       return artistNotOnDayResponse(matches, dayFilter.requestedDays);
     }
     matches = dayFilter.filtered;
+  } else if (matches.length > 1) {
+    matches = preferTodayWhenSameArtist(matches);
+  }
+  if (matches.length > 10) {
+    return { response: BROAD_QUERY_RESPONSE };
   }
   if (matches.length > 1) {
     return {
@@ -958,6 +1205,13 @@ export function handleStageLookup(query: string, context?: AnswerContext): {
   };
 }
 
+// Rank a stage for now-playing display. Lower index = higher priority.
+// Stages not in the list go after, alphabetical.
+function nowPlayingStageRank(stageName: string): number {
+  const idx = HEADLINER_STAGE_ORDER.indexOf(stageName);
+  return idx === -1 ? 99 : idx;
+}
+
 export function handleNowPlaying(query: string = ""): string {
   const { day, minutes } = getFestivalNow();
   if (!day) {
@@ -967,13 +1221,19 @@ export function handleNowPlaying(query: string = ""): string {
   const onStage = (a: Artist) => !stage || a.stage === stage.stage_name;
   const label = stage ? `${stage.stage_name} now` : `Playing now (${day})`;
 
-  const live = artists.filter(
-    (a) =>
-      a.day === day &&
-      toMinutes(a.start_time) <= minutes &&
-      toMinutes(a.end_time) > minutes &&
-      onStage(a),
-  );
+  const live = artists
+    .filter(
+      (a) =>
+        a.day === day &&
+        toMinutes(a.start_time) <= minutes &&
+        toMinutes(a.end_time) > minutes &&
+        onStage(a),
+    )
+    .sort((a, b) => {
+      const r = nowPlayingStageRank(a.stage) - nowPlayingStageRank(b.stage);
+      if (r !== 0) return r;
+      return a.stage.localeCompare(b.stage);
+    });
   if (live.length > 0) {
     // Single-stage, single-set → tight answer.
     if (stage && live.length === 1) {
@@ -1270,7 +1530,26 @@ export function handleTimeWindow(query: string): { response: string; pending?: P
     .filter((a) => toMinutes(a.start_time) < windowEnd && toMinutes(a.end_time) > windowStart);
   if (stage) sets = sets.filter((a) => a.stage === stage.stage_name);
   sets = sets.sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time));
-  if (sets.length === 0) return { response: `${label} on ${targetDay}: nothing in the data.` };
+  if (sets.length === 0) {
+    // Hyper-specific (stage + clock + day) with no set covering that minute:
+    // surface the next set on that stage rather than a flat "nothing".
+    if (stage && clock !== null && targetDay) {
+      const upcoming = artists
+        .filter((a) => a.day === targetDay && a.stage === stage.stage_name)
+        .filter((a) => toMinutes(a.start_time) > windowStart)
+        .sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time));
+      if (upcoming.length > 0) {
+        const next = upcoming[0];
+        return {
+          response: [
+            `Nothing on ${stage.stage_name} at ${formatMinutes(clock)} on ${targetDay}.`,
+            `Up next: ${next.artist_name} — ${formatTime(next.start_time)}–${formatTime(next.end_time)}.`,
+          ].join("\n"),
+        };
+      }
+    }
+    return { response: `${label} on ${targetDay}: nothing in the data.` };
+  }
   // Hyper-specific query (one stage, one moment, one band) → tight answer.
   if (sets.length === 1 && stage) {
     const a = sets[0];
@@ -1510,6 +1789,36 @@ export function handleFoodLookup(query: string): string {
   return matches.map((v) => `• ${v.vendor_name} — ${v.location_description}\n  ${v.food_items.join(", ")}`).join("\n\n");
 }
 
+// Curated must-try picks — the iconic Jazz Fest foods. Order matters
+// (most-iconic first). Falls back gracefully if a vendor isn't in the data.
+const POPULAR_FOOD_PICKS: { vendorMatch: string; foodItem: string }[] = [
+  { vendorMatch: "Panaroma", foodItem: "Crawfish Bread" },
+  { vendorMatch: "Big River", foodItem: "Crawfish Monica" },
+  { vendorMatch: "WWOZ Community Radio", foodItem: "Mango Freeze" },
+  { vendorMatch: "Walker's", foodItem: "Cochon de Lait Po-Boy" },
+  { vendorMatch: "Cafe du Monde", foodItem: "Beignets" },
+];
+
+export function handleFoodRecommendations(): string {
+  const lines: string[] = ["Must-try Jazz Fest food:"];
+  let added = 0;
+  for (const pick of POPULAR_FOOD_PICKS) {
+    const vendor = vendors.find((v) =>
+      v.vendor_name.toLowerCase().includes(pick.vendorMatch.toLowerCase()),
+    );
+    if (!vendor) continue;
+    lines.push(`• ${pick.foodItem} — ${vendor.vendor_name} (${vendor.location_description})`);
+    added++;
+    if (added >= 4) break;
+  }
+  if (added === 0) {
+    return "Try classics: crawfish bread, crawfish monica, mango freeze, cochon de lait po-boy, beignets.";
+  }
+  lines.push("");
+  lines.push("Want something specific? Try a food name or ingredient.");
+  return lines.join("\n");
+}
+
 // ---- Disambiguation resolution ----
 
 // When the previous turn offered 2+ day options, resolve a short reply to one.
@@ -1609,7 +1918,11 @@ function maybeRewriteFollowUp(query: string, context?: AnswerContext): string | 
 // ---- Top-level route ----
 
 export function answer(query: string, context?: AnswerContext): AnswerResult {
-  const trimmed = query.trim();
+  // Voice-to-text and autocorrect cleanup before any matching/classifying.
+  // Real-world logs show "tente"/"economy 10"/"playint" are common — bridging
+  // them upstream avoids dragging the noise through every downstream rule.
+  const cleaned = correctVoiceTypos(query);
+  const trimmed = cleaned.trim();
   if (!trimmed) {
     return { intent: "unknown", response: "Ask me about an artist, a stage, a day, a genre, what's on now, or where to find food." };
   }
@@ -1657,6 +1970,8 @@ export function answer(query: string, context?: AnswerContext): AnswerResult {
       return { intent, ...handleArtistLookup(trimmed) };
     case "food_lookup":
       return { intent, response: handleFoodLookup(trimmed) };
+    case "food_recommendations":
+      return { intent, response: handleFoodRecommendations() };
     case "day_lookup":
       return { intent, ...handleDayLookup(trimmed, context) };
     case "next_on_stage":
@@ -1675,20 +1990,19 @@ export function answer(query: string, context?: AnswerContext): AnswerResult {
       return { intent, response: handleFaqLookup(trimmed) };
     case "headliner_lookup":
       return { intent, ...handleHeadlinerLookup(trimmed) };
-    default:
+    default: {
+      // Last-chance: maybe a fuzzy artist guess salvages the query.
+      const guess = findClosestArtistGuess(trimmed);
+      if (guess) {
+        return {
+          intent: "unknown",
+          response: `I didn't catch that — did you mean ${guess.artist_name}?`,
+        };
+      }
       return {
         intent: "unknown",
-        response: [
-          "Not sure what you're asking. Try:",
-          "• \"What time does Trombone Shorty play?\"",
-          "• \"Who's playing on Festival Stage Sunday?\"",
-          "• \"Any funk on Saturday?\"",
-          "• \"What's on at 5pm Saturday?\"",
-          "• \"What overlaps with Stevie Nicks?\"",
-          "• \"Who's after Lorde?\"",
-          "• \"Where is crawfish bread?\"",
-          "• \"Tell me about Rod Stewart\"",
-        ].join("\n"),
+        response: "I'm not finding that one. Try an artist name, stage name, or food item.",
       };
+    }
   }
 }
