@@ -1074,7 +1074,25 @@ function findClosestArtistGuess(query: string): Artist | null {
   if (!q || q.length < 3) return null;
   if (BARE_NON_ARTIST_WORDS.has(q)) return null;
 
-  const qTokens = q.split(" ").filter((t) => t.length >= 3);
+  // Filter out stopwords AND pronouns so common words like "that"/"who"/"is"
+  // don't drive a fuzzy match to artists like Thais Clark or Mia Borders.
+  // Without this, "who is that" matches "thais" via edit distance 2.
+  const PRONOUN_GUARD = new Set([
+    "who", "what", "where", "when", "why", "how",
+    "this", "that", "those", "these",
+    "him", "her", "them", "they", "she",
+    "the", "and", "for", "from", "with", "into", "about",
+    "is", "are", "was", "were", "be", "been",
+    "do", "does", "did", "have", "has", "had",
+    "can", "could", "should", "would", "will",
+    "play", "plays", "playing", "played",
+    "tell", "give", "show", "find",
+    "more", "less", "any", "all", "some",
+    "very", "really", "just", "yes", "no",
+  ]);
+  const qTokens = q
+    .split(" ")
+    .filter((t) => t.length >= 3 && !STOPWORDS.has(t) && !PRONOUN_GUARD.has(t));
   if (qTokens.length === 0) return null;
 
   let best: { artist: Artist; score: number } | null = null;
@@ -2332,14 +2350,21 @@ function resolveDayFromReply(reply: string, options: FestivalDay[]): FestivalDay
 // Uses anchored regex on the FULL trimmed query so longer questions still
 // route through normal classification.
 
-const FOLLOWUP_BIO_RE =
-  /^(who\s+(is|s)\s+(he|she|they)|who\s+are\s+they|tell\s+me\s+(about|more\s+about)\s+(him|her|them|that(\s+one)?)|more\s+about\s+(him|her|them)|bio|his\s+bio|her\s+bio|their\s+bio)\??$/;
+// Pronouns that refer to the lastArtist. Used inside follow-up regexes so
+// "him/her/them/that/this/it" all act as the same handle to context.lastArtist.
+const ARTIST_PRONOUN = "(he|she|they|him|her|them|that|that\\s+one|this|this\\s+one|it)";
 
-const FOLLOWUP_STAGE_RE =
-  /^(what\s+stage|which\s+stage|where|where\s+is\s+(he|she|they|him|her|them|it)|what\s+stage\s+is\s+(he|she|they|it)\s+(on|playing(\s+on)?)|where\s+(does|do)\s+(he|she|they|it)\s+play)\??$/;
+const FOLLOWUP_BIO_RE = new RegExp(
+  `^(who\\s+(is|s)\\s+${ARTIST_PRONOUN}|whos\\s+${ARTIST_PRONOUN}|who\\s+are\\s+they|tell\\s+me\\s+(about|more\\s+about)\\s+${ARTIST_PRONOUN}|more\\s+about\\s+${ARTIST_PRONOUN}|bio|his\\s+bio|her\\s+bio|their\\s+bio|info|more\\s+info)\\??$`,
+);
 
-const FOLLOWUP_TIME_RE =
-  /^(what\s+time|when|when\s+(does|do)\s+(he|she|they|it)\s+play|when\s+(is|are)\s+(he|she|they|it)\s+(on|playing))\??$/;
+const FOLLOWUP_STAGE_RE = new RegExp(
+  `^(what\\s+stage|which\\s+stage|where|where\\s+(is|are|s)\\s+${ARTIST_PRONOUN}|what\\s+stage\\s+(is|are)\\s+${ARTIST_PRONOUN}\\s+(on|playing(\\s+on)?)|where\\s+(does|do)\\s+${ARTIST_PRONOUN}\\s+play)\\??$`,
+);
+
+const FOLLOWUP_TIME_RE = new RegExp(
+  `^(what\\s+time|when|when\\s+(does|do)\\s+${ARTIST_PRONOUN}\\s+play|when\\s+(is|are)\\s+${ARTIST_PRONOUN}\\s+(on|playing)|what\\s+time\\s+(is|are)\\s+${ARTIST_PRONOUN}\\s+(on|playing))\\??$`,
+);
 
 const FOLLOWUP_NEXT_RE =
   /^(who(\s+is|s)\s+after|what(\s+is|s)\s+next|what(\s+is|s)\s+after|next|who\s+plays\s+after)\??$/;
