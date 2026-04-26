@@ -74,35 +74,45 @@ export type PendingDisambiguation =
   | { kind: "day"; options: FestivalDay[]; originalQuery: string }
   | { kind: "surprise" };
 
+// Active conversation memory. The client sends the previous context with
+// every request and stores the AnswerResult.updatedContext as the new
+// state. This is what makes follow-ups like "who is he?" / "what stage?"
+// resolvable without naming the subject again.
 export interface AnswerContext {
-  // The last artist the assistant talked about, used to resolve pronouns
-  // like "them", "they", "that band" in follow-up questions.
+  // The last artist the assistant talked about. Resolves pronouns ("him",
+  // "her", "them", "they", "that band") and bare follow-ups ("what stage?").
   lastArtist?: string;
-  // The last stage the assistant resolved (either because the user asked
-  // about it directly, or because the last artist plays there). Lets
-  // follow-ups like "what's next there?" or "on that stage" work.
+  // The last stage the assistant resolved. Resolves "there", "that stage".
   lastStage?: string;
-  // The last day the assistant resolved. Lets follow-ups like
-  // "and Saturday?" or "same day?" work.
+  // The last day the assistant resolved. Resolves "that day", "then".
   lastDay?: FestivalDay;
+  // The last clock time the assistant resolved (HH:MM 24h). Powers
+  // "what else is playing then?" follow-ups.
+  lastTime?: string;
+  // The previous turn's intent. Lets the bot reason about flow — e.g. shift
+  // from music to "what about food?".
+  lastIntent?: Intent;
   // If the previous turn asked a follow-up ("which day?"), this carries
-  // the options and original query so a short reply like "23" or "first" works.
+  // the options and original query so a short reply like "23" / "first" / "music" resolves.
   pending?: PendingDisambiguation;
 }
 
 export interface AnswerResult {
   intent: Intent;
   response: string;
-  // If the response is artist-specific, the client stores this as the new
-  // conversation "lastArtist" for follow-up queries.
+  // Per-field resolutions (kept for backwards compatibility with the
+  // existing client). New code should prefer `updatedContext`.
   resolvedArtist?: string;
-  // Stage the handler resolved (if any). Client stores as lastStage.
   resolvedStage?: string;
-  // Day the handler resolved (if any). Client stores as lastDay.
   resolvedDay?: FestivalDay;
+  resolvedTime?: string;
   // If the handler asked a follow-up question, client stashes this and sends
   // it back on the next turn as context.pending.
   pending?: PendingDisambiguation;
+  // Full new context to store on the client. Already merges any prior
+  // context with what this turn resolved. Frontend can replace its state
+  // wholesale with this value.
+  updatedContext?: AnswerContext;
 }
 
 export interface ChatMessage {

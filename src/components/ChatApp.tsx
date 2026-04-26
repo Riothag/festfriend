@@ -2,9 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import type {
+  AnswerContext,
   ChatMessage as TChatMessage,
-  FestivalDay,
-  PendingDisambiguation,
 } from "@/types";
 import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
@@ -15,15 +14,11 @@ import FilterBar from "./FilterBar";
 export default function ChatApp() {
   const [messages, setMessages] = useState<TChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
-  // Remembered across turns so "who is after them?" works.
-  const lastArtistRef = useRef<string | null>(null);
-  // Stage last resolved — powers "what's next there?" / "that stage".
-  const lastStageRef = useRef<string | null>(null);
-  // Day last resolved — powers "same day?" / "that day".
-  const lastDayRef = useRef<FestivalDay | null>(null);
-  // Carries a pending follow-up question (e.g. "which Thursday?") so a short
-  // reply like "23" resolves to the right day.
-  const pendingRef = useRef<PendingDisambiguation | null>(null);
+  // Single source of conversation memory — sent to /api/chat with every
+  // request and replaced wholesale from the response's updatedContext.
+  // A ref (not state) so we always read/write the latest value without
+  // re-rendering on every turn.
+  const contextRef = useRef<AnswerContext>({});
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -44,28 +39,18 @@ export default function ChatApp() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: text,
-          lastArtist: lastArtistRef.current ?? undefined,
-          lastStage: lastStageRef.current ?? undefined,
-          lastDay: lastDayRef.current ?? undefined,
-          pending: pendingRef.current ?? undefined,
+          context: contextRef.current,
         }),
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
       const data = await res.json();
-      if (typeof data?.resolvedArtist === "string") {
-        lastArtistRef.current = data.resolvedArtist;
+      // Replace context wholesale from the server. The server already
+      // merges prior context with this turn's resolutions.
+      if (data?.updatedContext && typeof data.updatedContext === "object") {
+        contextRef.current = data.updatedContext as AnswerContext;
       }
-      if (typeof data?.resolvedStage === "string") {
-        lastStageRef.current = data.resolvedStage;
-      }
-      if (typeof data?.resolvedDay === "string") {
-        lastDayRef.current = data.resolvedDay as FestivalDay;
-      }
-      // Stash any new pending follow-up, or clear the previous one if the
-      // server consumed it.
-      pendingRef.current = (data?.pending as PendingDisambiguation | undefined) ?? null;
       const botText: string = data?.response ?? "No answer.";
       const botMsg: TChatMessage = {
         id: `a-${Date.now()}`,

@@ -2319,6 +2319,204 @@ function resolveDayFromReply(reply: string, options: FestivalDay[]): FestivalDay
   return null;
 }
 
+// ---- Conversational follow-up detection ----
+//
+// Catches short replies that lean entirely on prior conversation context.
+// Examples (with `lastArtist = "Jason Isbell"`):
+//   "who is he?"        → bio
+//   "what stage?"       → "Shell Gentilly Stage — today, 3:30 PM–4:50 PM."
+//   "what time?" / "when?" → time slot
+//   "who's after?"      → next on that stage
+//   "anything similar?" → genre-similar artists
+//
+// Uses anchored regex on the FULL trimmed query so longer questions still
+// route through normal classification.
+
+const FOLLOWUP_BIO_RE =
+  /^(who\s+(is|s)\s+(he|she|they)|who\s+are\s+they|tell\s+me\s+(about|more\s+about)\s+(him|her|them|that(\s+one)?)|more\s+about\s+(him|her|them)|bio|his\s+bio|her\s+bio|their\s+bio)\??$/;
+
+const FOLLOWUP_STAGE_RE =
+  /^(what\s+stage|which\s+stage|where|where\s+is\s+(he|she|they|him|her|them|it)|what\s+stage\s+is\s+(he|she|they|it)\s+(on|playing(\s+on)?)|where\s+(does|do)\s+(he|she|they|it)\s+play)\??$/;
+
+const FOLLOWUP_TIME_RE =
+  /^(what\s+time|when|when\s+(does|do)\s+(he|she|they|it)\s+play|when\s+(is|are)\s+(he|she|they|it)\s+(on|playing))\??$/;
+
+const FOLLOWUP_NEXT_RE =
+  /^(who(\s+is|s)\s+after|what(\s+is|s)\s+next|what(\s+is|s)\s+after|next|who\s+plays\s+after)\??$/;
+
+const FOLLOWUP_PREV_RE =
+  /^(who(\s+is|s)\s+before|what(\s+is|s)\s+before|who\s+played\s+before)\??$/;
+
+const FOLLOWUP_SIMILAR_RE =
+  /^(anything\s+similar|similar(\s+artists?|\s+bands?)?|more\s+like\s+(this|him|her|them)|any\s+others?\s+like\s+(him|her|them|that)|other\s+(bands?|artists?)\s+like\s+(him|her|them))\??$/;
+
+const FOLLOWUP_ELSE_PLAYING_RE =
+  /^(what\s+else\s+is\s+playing|whats\s+else\s+playing|what\s+else|else\s+playing|anything\s+else\s+playing|anything\s+else)\??$/;
+
+const FOLLOWUP_FOOD_INTENT_RE =
+  /^(what\s+about\s+food|hows\s+the\s+food|food|how\s+about\s+food|im\s+hungry\s+now|getting\s+hungry)\??$/;
+
+const NO_SUBJECT_FALLBACK =
+  "I can, but who are we talking about? Try an artist name like Jason Isbell.";
+
+// Find similar artists by genre-token overlap. Prefer same day or today.
+// Excludes the target artist and Food Heritage Stage demos.
+export function handleSimilarArtists(
+  artistName: string,
+  context?: AnswerContext,
+): { response: string; resolvedArtist?: string; resolvedStage?: string; resolvedDay?: FestivalDay } {
+  void context;
+  const target = findArtist(artistName);
+  if (!target) {
+    return { response: `I lost track of ${artistName}.` };
+  }
+  const targetGenres = norm(target.genre)
+    .split(" ")
+    .filter((t) => t.length > 2);
+  if (targetGenres.length === 0) {
+    return { response: `Not enough genre info on ${target.artist_name} to find similar acts.` };
+  }
+  const today = getFestivalNow().day;
+  const scored = artists
+    .filter(
+      (a) =>
+        a.artist_name !== target.artist_name &&
+        a.stage !== "Food Heritage Stage",
+    )
+    .map((a) => {
+      const aGenres = norm(a.genre).split(" ");
+      const overlap = targetGenres.filter((g) => aGenres.includes(g)).length;
+      const sameDay = a.day === target.day ? 0.7 : 0;
+      const todayBoost = today && a.day === today ? 0.4 : 0;
+      return { artist: a, score: overlap + sameDay + todayBoost };
+    })
+    .filter((s) => s.score >= 1)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+  if (scored.length === 0) {
+    return { response: `Nothing in the data overlaps with ${target.genre}.` };
+  }
+  const lines = [
+    `Similar to ${target.artist_name} (${target.genre}):`,
+    "",
+  ];
+  for (const s of scored) {
+    const a = s.artist;
+    const dayLabel = formatRelativeDay(a.day as FestivalDay);
+    lines.push(
+      `• ${a.artist_name} — ${dayLabel}, ${formatTime(a.start_time)}–${formatTime(a.end_time)} on ${a.stage}`,
+    );
+  }
+  return { response: lines.join("\n"), resolvedArtist: target.artist_name };
+}
+
+function resolveConversationalFollowUp(
+  query: string,
+  context?: AnswerContext,
+): AnswerResult | null {
+  const q = norm(query);
+  if (!q) return null;
+
+  // All the patterns below assume prior subject context (lastArtist).
+  // Group their handling so the no-subject fallback is consistent.
+
+  if (FOLLOWUP_BIO_RE.test(q)) {
+    if (!context?.lastArtist) {
+      return { intent: "unknown", response: NO_SUBJECT_FALLBACK };
+    }
+    const result = handleArtistBio(context.lastArtist);
+    return { intent: "artist_bio", ...result };
+  }
+
+  if (FOLLOWUP_STAGE_RE.test(q)) {
+    if (!context?.lastArtist) {
+      return { intent: "unknown", response: NO_SUBJECT_FALLBACK };
+    }
+    const a = findArtist(context.lastArtist);
+    if (!a) return { intent: "unknown", response: "I lost track — who were we talking about?" };
+    const dayLabel = formatRelativeDay(a.day as FestivalDay);
+    return {
+      intent: "artist_lookup",
+      response: `${a.stage} — ${dayLabel}, ${formatTime(a.start_time)}–${formatTime(a.end_time)}.`,
+      resolvedArtist: a.artist_name,
+      resolvedStage: a.stage,
+      resolvedDay: a.day as FestivalDay,
+    };
+  }
+
+  if (FOLLOWUP_TIME_RE.test(q)) {
+    if (!context?.lastArtist) {
+      return { intent: "unknown", response: NO_SUBJECT_FALLBACK };
+    }
+    const a = findArtist(context.lastArtist);
+    if (!a) return { intent: "unknown", response: "I lost track — who were we talking about?" };
+    const dayLabel = formatRelativeDay(a.day as FestivalDay);
+    return {
+      intent: "artist_lookup",
+      response: `${dayLabel}, ${formatTime(a.start_time)}–${formatTime(a.end_time)} on ${a.stage}.`,
+      resolvedArtist: a.artist_name,
+      resolvedStage: a.stage,
+      resolvedDay: a.day as FestivalDay,
+    };
+  }
+
+  if (FOLLOWUP_NEXT_RE.test(q)) {
+    if (!context?.lastArtist) {
+      return { intent: "unknown", response: NO_SUBJECT_FALLBACK };
+    }
+    const result = handleNextOnStage(context.lastArtist, context);
+    return { intent: "next_on_stage", ...result };
+  }
+
+  if (FOLLOWUP_PREV_RE.test(q)) {
+    if (!context?.lastArtist) {
+      return { intent: "unknown", response: NO_SUBJECT_FALLBACK };
+    }
+    const result = handlePrevOnStage(context.lastArtist, context);
+    return { intent: "prev_on_stage", ...result };
+  }
+
+  if (FOLLOWUP_SIMILAR_RE.test(q)) {
+    if (!context?.lastArtist) {
+      return { intent: "unknown", response: NO_SUBJECT_FALLBACK };
+    }
+    const result = handleSimilarArtists(context.lastArtist, context);
+    return { intent: "genre_lookup", ...result };
+  }
+
+  if (FOLLOWUP_ELSE_PLAYING_RE.test(q)) {
+    // No subject required — answer "what else is on right now" generically.
+    return { intent: "now_playing", response: handleNowPlaying("") };
+  }
+
+  if (FOLLOWUP_FOOD_INTENT_RE.test(q)) {
+    return { intent: "food_recommendations", response: handleFoodRecommendations() };
+  }
+
+  return null;
+}
+
+// Merge the prior context with what this turn resolved. The frontend stores
+// the result wholesale as the new conversation memory.
+function mergeContext(
+  prior: AnswerContext | undefined,
+  result: AnswerResult,
+): AnswerContext {
+  const ctx: AnswerContext = { ...prior };
+  if (result.intent !== "unknown") ctx.lastIntent = result.intent;
+  if (result.resolvedArtist) ctx.lastArtist = result.resolvedArtist;
+  if (result.resolvedStage) ctx.lastStage = result.resolvedStage;
+  if (result.resolvedDay) ctx.lastDay = result.resolvedDay;
+  if (result.resolvedTime) ctx.lastTime = result.resolvedTime;
+  // Pending state — only carry forward when explicitly returned this turn.
+  if (result.pending) {
+    ctx.pending = result.pending;
+  } else {
+    delete ctx.pending;
+  }
+  return ctx;
+}
+
 // ---- Follow-up query rewriting ----
 
 // Connectors that flag a short reply as a follow-up ("and Saturday?",
@@ -2377,7 +2575,15 @@ function maybeRewriteFollowUp(query: string, context?: AnswerContext): string | 
 
 // ---- Top-level route ----
 
+// Public entrypoint. All logic lives in routeAnswer; this wrapper computes
+// the merged context once at the very end so recursive routing doesn't
+// double-wrap or lose intermediate resolutions.
 export function answer(query: string, context?: AnswerContext): AnswerResult {
+  const result = routeAnswer(query, context);
+  return { ...result, updatedContext: mergeContext(context, result) };
+}
+
+function routeAnswer(query: string, context?: AnswerContext): AnswerResult {
   // Voice-to-text and autocorrect cleanup before any matching/classifying.
   // Real-world logs show "tente"/"economy 10"/"playint" are common — bridging
   // them upstream avoids dragging the noise through every downstream rule.
@@ -2406,7 +2612,7 @@ export function answer(query: string, context?: AnswerContext): AnswerResult {
     const resolved = resolveDayFromReply(trimmed, context.pending.options);
     if (resolved) {
       const rewritten = `${context.pending.originalQuery} ${resolved}`;
-      return answer(rewritten, rest);
+      return routeAnswer(rewritten, rest);
     }
 
     // (2) Augmented re-run: reply may narrow the options (e.g. "friday" against
@@ -2414,11 +2620,16 @@ export function answer(query: string, context?: AnswerContext): AnswerResult {
     //     and re-run — this preserves clock-time / stage filters across the
     //     multi-step disambiguation.
     const augmented = `${context.pending.originalQuery} ${trimmed}`;
-    const augResult = answer(augmented, rest);
+    const augResult = routeAnswer(augmented, rest);
     if (augResult.intent !== "unknown") return augResult;
 
     // Neither worked — fall through and treat `trimmed` as a fresh query.
   }
+
+  // CONVERSATIONAL FOLLOW-UPS — terse replies that lean entirely on prior
+  // context. "Who is he?", "what stage?", "anything similar?" etc.
+  const followUp = resolveConversationalFollowUp(trimmed, context);
+  if (followUp) return followUp;
 
   // Follow-up rewrite: a short reply like "and Saturday?" or "tomorrow?"
   // after we've been talking about an artist/stage is re-expanded into a
@@ -2426,7 +2637,7 @@ export function answer(query: string, context?: AnswerContext): AnswerResult {
   // without introducing an LLM.
   const rewritten = maybeRewriteFollowUp(trimmed, context);
   if (rewritten && rewritten !== trimmed) {
-    return answer(rewritten, context);
+    return routeAnswer(rewritten, context);
   }
 
   const intent = classify(trimmed);
