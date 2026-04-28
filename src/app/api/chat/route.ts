@@ -74,6 +74,13 @@ function parseClockString(value: unknown): string | undefined {
 // Accept either the legacy flat shape (lastArtist/lastStage/...) or a
 // nested `context` object. The frontend now sends `context`; older
 // clients still work.
+function parseSurpriseCategory(
+  value: unknown,
+): "food" | "music" | "culture" | undefined {
+  if (value === "food" || value === "music" || value === "culture") return value;
+  return undefined;
+}
+
 function readContext(body: Record<string, unknown>): AnswerContext {
   const ctxSource = (
     body.context && typeof body.context === "object"
@@ -86,6 +93,7 @@ function readContext(body: Record<string, unknown>): AnswerContext {
     lastDay: parseFestivalDay(ctxSource.lastDay),
     lastTime: parseClockString(ctxSource.lastTime),
     lastIntent: parseIntent(ctxSource.lastIntent),
+    lastSurpriseCategory: parseSurpriseCategory(ctxSource.lastSurpriseCategory),
     pending: isValidPending(ctxSource.pending) ? ctxSource.pending : undefined,
   };
 }

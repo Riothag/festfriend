@@ -203,14 +203,54 @@ function scoreArtists(query: string): { artist: Artist; score: number }[] {
   return scored.sort((a, b) => b.score - a.score);
 }
 
+// High-confidence fuzzy auto-correct on the FULL artist name. Catches typos
+// like "David Burn" → "David Byrne", "rod stewert" → "Rod Stewart" that
+// scoreArtists' token-level fuzzy missed because no individual token cleared
+// the per-token edit-distance budget. Tighter threshold than the "did you
+// mean" suggestion so we only auto-resolve when we're very sure.
+function findArtistFuzzy(query: string): Artist | null {
+  const q = norm(query);
+  // Min length 5 so we don't match short common words (e.g. "food", "now").
+  if (!q || q.length < 5) return null;
+  if (BARE_NON_ARTIST_WORDS.has(q)) return null;
+  // Skip when the only tokens are stopwords / pronouns — defensive against
+  // queries like "who is that one" matching an artist by accident.
+  const meaningfulTokens = q
+    .split(" ")
+    .filter((t) => t.length >= 3 && !STOPWORDS.has(t));
+  if (meaningfulTokens.length === 0) return null;
+
+  let best: { artist: Artist; score: number } | null = null;
+  for (const a of artists) {
+    const name = norm(a.artist_name);
+    if (!name) continue;
+    // Only consider artists with similar overall length — prevents short
+    // queries from sloppy-matching long names.
+    if (Math.abs(q.length - name.length) > 4) continue;
+    const longer = Math.max(q.length, name.length);
+    if (longer < 5) continue;
+    const d = editDistance(q, name);
+    const ratio = d / longer;
+    if (!best || ratio < best.score) best = { artist: a, score: ratio };
+  }
+  // 0.22 normalized distance: "david burn" → "David Byrne" (2/11 = 0.18) ✓,
+  // "rod stewert" → "Rod Stewart" (1/11 = 0.09) ✓. Tighter than the 0.5
+  // threshold used by findClosestArtistGuess to keep auto-resolves safe.
+  return best && best.score <= 0.22 ? best.artist : null;
+}
+
 function findArtist(query: string): Artist | null {
   const matches = scoreArtists(query);
-  return matches[0]?.artist ?? null;
+  if (matches[0]) return matches[0].artist;
+  return findArtistFuzzy(query);
 }
 
 // All matches for disambiguation
 function findArtists(query: string): Artist[] {
-  return scoreArtists(query).map((m) => m.artist);
+  const matches = scoreArtists(query).map((m) => m.artist);
+  if (matches.length > 0) return matches;
+  const fuzzy = findArtistFuzzy(query);
+  return fuzzy ? [fuzzy] : [];
 }
 
 // Common short / colloquial names that should resolve to a specific stage.
@@ -249,48 +289,161 @@ const STAGE_ALIASES: { alias: string; stage: string }[] = [
   { alias: "rhythmpourium tent", stage: "Rhythmpourium Tent" },
 ];
 
+// Distinctive name tokens for each stage — used by fuzzy stage matching to
+// catch typos and spaced-out forms like "gent tilly" → Shell Gentilly Stage.
+// Excludes generic words ("stage", "tent", "hall", brand names like
+// "shell" / "sheraton" / "ochsner").
+const STAGE_GENERIC_WORDS = new Set([
+  "stage", "tent", "hall", "and", "the",
+  "shell", "sheraton", "ochsner", "sandals", "resorts",
+  "new", "orleans",
+]);
+
+// Stage-name tokens that are ALSO genre words. Bare queries of these
+// ("blues", "jazz", "gospel") should route to genre_lookup, not the matching
+// stage's lineup — unless the query also has an explicit stage-context word.
+const KNOWN_STAGE_GENRE_TOKENS = new Set([
+  "blues", "jazz", "gospel", "soul", "funk", "rock", "country", "indie",
+]);
+
+function distinctiveStageTokens(stageName: string): string[] {
+  return norm(stageName)
+    .split(" ")
+    .filter((w) => w.length >= 4 && !STAGE_GENERIC_WORDS.has(w));
+}
+
+// Single-stage match. Returns the first hit; for multi-stage queries use findStages.
 function findStage(query: string): Stage | null {
+  return findStages(query)[0] ?? null;
+}
+
+// Multi-stage match. Returns every distinct stage referenced in the query
+// (by exact name, alias, or distinctive-token fuzzy match). Order roughly
+// follows match strength then appearance.
+function findStages(query: string): Stage[] {
   const q = norm(query);
-  if (!q) return null;
-  // (1) Exact match
-  let hit = stages.find((s) => norm(s.stage_name) === q);
-  if (hit) return hit;
-  // (2) Substring either direction + short-name substring
-  hit = stages.find((s) => {
+  if (!q) return [];
+
+  type Hit = { stage: Stage; rank: number; pos: number };
+  const hits: Hit[] = [];
+  const seen = new Set<string>();
+  const addHit = (stage: Stage, rank: number, pos: number) => {
+    if (seen.has(stage.stage_name)) return;
+    seen.add(stage.stage_name);
+    hits.push({ stage, rank, pos });
+  };
+
+  // (1) Exact full-name occurrence anywhere in the query (handles
+  //     "festival stage gentilly stage and congo square" finding all three).
+  for (const s of stages) {
     const sn = norm(s.stage_name);
-    const snShort = sn.replace(" stage", "").replace(" tent", "");
-    return sn.includes(q) || q.includes(sn) || (snShort && q.includes(snShort));
-  });
-  if (hit) return hit;
-  // (3) Alias table — tries longer aliases first so "gentilly stage" wins
-  //     over bare "gentilly" when both could apply.
-  const sortedAliases = [...STAGE_ALIASES].sort((a, b) => b.alias.length - a.alias.length);
+    const idx = q.indexOf(sn);
+    if (idx >= 0) addHit(s, 0, idx);
+  }
+
+  // (2) Aliases — longest-first so "gentilly stage" beats bare "gentilly".
+  const sortedAliases = [...STAGE_ALIASES].sort(
+    (a, b) => b.alias.length - a.alias.length,
+  );
   for (const { alias, stage } of sortedAliases) {
-    const re = new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
-    if (re.test(q)) {
+    const re = new RegExp(
+      `\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+    );
+    const m = q.match(re);
+    if (m && m.index !== undefined) {
       const found = stages.find((s) => s.stage_name === stage);
-      if (found) return found;
+      if (found) addHit(found, 1, m.index);
     }
   }
-  // (4) Token-overlap fallback. "economy tent" → Economy Hall Tent because
-  //     {economy, tent} is a subset of {economy, hall, tent}. Requires the
-  //     query to bring at least one DISTINCTIVE (not "stage" / "tent") token
-  //     so generic words alone don't match a random stage.
-  const qWords = q.split(" ").filter((w) => w.length >= 3);
+
+  // (3) Distinctive single-token match (e.g. "congo" → Congo Square Stage).
+  //     Word-boundary on the distinctive name word.
+  //     Genre tokens ("blues", "jazz", "gospel") only match if the query also
+  //     has an explicit stage-context word ("stage" / "tent" / "hall" /
+  //     "pavilion") — otherwise bare "blues" should route to genre_lookup,
+  //     not Blues Tent's lineup.
+  const hasStageContext = /\b(stage|tent|hall|pavilion)\b/.test(q);
+  for (const s of stages) {
+    for (const tok of distinctiveStageTokens(s.stage_name)) {
+      if (KNOWN_STAGE_GENRE_TOKENS.has(tok) && !hasStageContext) continue;
+      const re = new RegExp(
+        `\\b${tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+      );
+      const m = q.match(re);
+      if (m && m.index !== undefined) {
+        addHit(s, 2, m.index);
+        break;
+      }
+    }
+  }
+
+  // (4) Fuzzy distinctive-token match — catches typos like "gent tilly" →
+  //     "gentilly". For each query word, check edit distance against each
+  //     stage's distinctive tokens. Spaced-out forms ("gent tilly") are also
+  //     tried as concatenations against distinctive tokens.
+  const qWordsRaw = q.split(" ");
+  const qWords = qWordsRaw.filter((w) => w.length >= 3);
   if (qWords.length >= 1) {
+    // Build candidate query terms: each individual word, plus consecutive
+    // pairs concatenated (so "gent tilly" → "genttilly" can match "gentilly").
+    const candidates: { term: string; pos: number }[] = [];
+    let runningPos = 0;
+    for (let i = 0; i < qWordsRaw.length; i++) {
+      const w = qWordsRaw[i];
+      if (w.length >= 3) candidates.push({ term: w, pos: runningPos });
+      if (i + 1 < qWordsRaw.length) {
+        const combined = (w + qWordsRaw[i + 1]).replace(/[^a-z0-9]/g, "");
+        if (combined.length >= 5) candidates.push({ term: combined, pos: runningPos });
+      }
+      runningPos += w.length + 1;
+    }
+    for (const s of stages) {
+      const tokens = distinctiveStageTokens(s.stage_name);
+      for (const tok of tokens) {
+        if (KNOWN_STAGE_GENRE_TOKENS.has(tok) && !hasStageContext) continue;
+        for (const cand of candidates) {
+          if (cand.term === tok) continue; // exact handled above
+          if (Math.abs(cand.term.length - tok.length) > 2) continue;
+          const longer = Math.max(cand.term.length, tok.length);
+          if (longer < 5) continue;
+          const d = editDistance(cand.term, tok);
+          // Strict: ≤2 edits AND ≤25% of the length.
+          if (d <= 2 && d / longer <= 0.25) {
+            addHit(s, 3, cand.pos);
+          }
+        }
+      }
+    }
+  }
+
+  // (5) Token-overlap fallback (legacy): {economy, tent} ⊆ {economy, hall, tent}.
+  if (hits.length === 0) {
+    const qSet = qWords;
     const candidates = stages
       .map((s) => {
         const sn = norm(s.stage_name);
         const sWords = sn.split(" ").filter((w) => w.length >= 3);
-        const matches = qWords.filter((w) => sWords.includes(w));
-        const distinctive = matches.filter((w) => w !== "stage" && w !== "tent" && w !== "hall");
-        return { stage: s, matchCount: matches.length, distinctive: distinctive.length, sWordCount: sWords.length };
+        const matches = qSet.filter((w) => sWords.includes(w));
+        const distinctive = matches.filter(
+          (w) => w !== "stage" && w !== "tent" && w !== "hall",
+        );
+        return {
+          stage: s,
+          matchCount: matches.length,
+          distinctive: distinctive.length,
+          sWordCount: sWords.length,
+        };
       })
-      .filter((c) => c.distinctive >= 1 && c.matchCount >= Math.min(2, c.sWordCount))
+      .filter(
+        (c) => c.distinctive >= 1 && c.matchCount >= Math.min(2, c.sWordCount),
+      )
       .sort((a, b) => b.matchCount - a.matchCount);
-    if (candidates.length > 0) return candidates[0].stage;
+    if (candidates.length > 0) addHit(candidates[0].stage, 4, 0);
   }
-  return null;
+
+  // Sort by rank (specificity), then by position in the query.
+  hits.sort((a, b) => a.rank - b.rank || a.pos - b.pos);
+  return hits.map((h) => h.stage);
 }
 
 // Standard "which day?" prompt, used whenever findDays returns multiple
@@ -328,6 +481,32 @@ function resolveRelativeDay(q: string): FestivalDay | null {
   return festivalDays.find((d) => d.date === targetStr)?.day ?? null;
 }
 
+// Calendar date (YYYY-MM-DD) "today" in the festival timezone. Used to
+// drop past festival days from disambiguation lists. If today comes after
+// every festival day, returns null (caller falls back to no filtering).
+function todayDateString(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: festivalTimezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+// Filter out festival days that have already happened. Used so disambiguation
+// for "Friday" / "this weekend" etc. doesn't show options that are in the past.
+function filterUpcomingDays(days: FestivalDay[]): FestivalDay[] {
+  const todayStr = todayDateString();
+  const upcoming = days.filter((d) => {
+    const fd = festivalDays.find((x) => x.day === d);
+    return fd ? fd.date >= todayStr : true;
+  });
+  // If everything is past, return the original list (better than empty).
+  return upcoming.length > 0 ? upcoming : days;
+}
+
 // Resolve a query to one or more festival days. Empty array if no day reference.
 function findDays(query: string): FestivalDay[] {
   const q = norm(query);
@@ -343,6 +522,20 @@ function findDays(query: string): FestivalDay[] {
   const has = (w: string) => new RegExp(`\\b${w}\\b`).test(q);
   const byWeekday = (weekday: "fri" | "sat" | "sun" | "thu"): FestivalDay[] =>
     festivalDays.filter((d) => d.day.toLowerCase().startsWith(weekday)).map((d) => d.day);
+
+  // "this weekend" / "next weekend" / "coming weekend" — return all days of the
+  // upcoming weekend. If we're mid-festival on weekend 1, "this weekend" is W1;
+  // otherwise it's W2. After both weekends pass, return [].
+  const wantsThisWeekend = /\b(this|next|coming|upcoming)\s+weekend\b/.test(q);
+  if (wantsThisWeekend || /^\s*weekend\s*\??$/.test(q)) {
+    const todayStr = todayDateString();
+    const W1 = festivalDays.slice(0, 4);
+    const W2 = festivalDays.slice(4, 8);
+    const w1Active = W1.some((d) => d.date >= todayStr);
+    const target = w1Active ? W1 : W2.some((d) => d.date >= todayStr) ? W2 : null;
+    if (!target) return [];
+    return filterUpcomingDays(target.map((d) => d.day));
+  }
 
   let weekday: "fri" | "sat" | "sun" | "thu" | null = null;
   if (has("thursday") || has("thurs") || has("thu")) weekday = "thu";
@@ -361,15 +554,29 @@ function findDays(query: string): FestivalDay[] {
   //   - "weekend 1" / "weekend 2"
   //   - "opening weekend" / "closing weekend" (or paired with a weekday)
   //   - month references ("april" / "may")
+  //   - "this/next/coming/upcoming Friday" (relative — pick the upcoming one)
   const firstSelector = /\b(first|1st)\s+(weekend|thursday|thu|friday|fri|saturday|sat|sunday|sun)\b/.test(q);
   const secondSelector = /\b(second|2nd)\s+(weekend|thursday|thu|friday|fri|saturday|sat|sunday|sun)\b/.test(q);
   const openingWeekend = /\bopening\s+(weekend|thursday|thu|friday|fri|saturday|sat|sunday|sun)\b/.test(q);
   const closingWeekend = /\bclosing\s+(weekend|thursday|thu|friday|fri|saturday|sat|sunday|sun)\b/.test(q);
+  const relativeWeekday = /\b(this|next|coming|upcoming)\s+(thursday|thu|friday|fri|saturday|sat|sunday|sun)\b/.test(q);
   if (firstSelector || has("weekend 1") || has("apr") || has("april") || openingWeekend) {
     return [days[0]];
   }
   if (secondSelector || has("weekend 2") || has("may") || closingWeekend) {
     return [days[days.length - 1]];
+  }
+  // "this/next Friday" → upcoming festival Friday (drop past dates).
+  if (relativeWeekday) {
+    const upcoming = filterUpcomingDays(days);
+    if (upcoming.length === 1) return upcoming;
+    return upcoming;
+  }
+  // Bare weekday during a live festival run — drop past options. If only one
+  // upcoming day remains, return it directly so the caller doesn't disambiguate.
+  const upcoming = filterUpcomingDays(days);
+  if (upcoming.length < days.length) {
+    return upcoming;
   }
   return days;
 }
@@ -1358,24 +1565,61 @@ export function handleStageLookup(query: string, context?: AnswerContext): {
   resolvedStage?: string;
   resolvedDay?: FestivalDay;
 } {
-  let s = findStage(query);
+  let matched = findStages(query);
   // "what's next there?" — resolve via lastStage if the query points to a
   // stage-pronoun and no explicit stage was parsed.
-  if (!s && hasStagePronoun(query) && context?.lastStage) {
-    s = stages.find((st) => st.stage_name === context.lastStage) ?? null;
+  if (matched.length === 0 && hasStagePronoun(query) && context?.lastStage) {
+    const carried = stages.find((st) => st.stage_name === context.lastStage);
+    if (carried) matched = [carried];
   }
-  if (!s) return { response: `No stage matches "${query}". Try: ${stages.map((x) => x.stage_name).join(", ")}.` };
+  if (matched.length === 0) {
+    return {
+      response: `No stage matches "${query}". Try: ${stages.map((x) => x.stage_name).join(", ")}.`,
+    };
+  }
   const days = findDays(query);
   if (days.length > 1) return whichDayPrompt(days, query);
-  let sets = artists.filter((a) => a.stage === s.stage_name);
-  let dayContext = "";
   let dayPinned: FestivalDay | null = days.length === 1 ? days[0] : null;
-  // If the user didn't mention a day but the festival is live right now,
-  // default to today — at the fest "what's on this stage" really means today.
   if (!dayPinned) {
     const today = getFestivalNow().day;
     if (today) dayPinned = today;
   }
+
+  // Multi-stage path: query mentioned 2+ stages. Render a section per stage.
+  if (matched.length >= 2) {
+    const blocks: string[] = [];
+    for (const s of matched) {
+      const sets = artists
+        .filter((a) => a.stage === s.stage_name && (!dayPinned || a.day === dayPinned))
+        .sort((a, b) => {
+          const byDay = festivalDayIndex(a.day) - festivalDayIndex(b.day);
+          if (byDay !== 0) return byDay;
+          return toMinutes(a.start_time) - toMinutes(b.start_time);
+        });
+      const header = dayPinned ? `${s.stage_name} — ${dayPinned}:` : `${s.stage_name}:`;
+      if (sets.length === 0) {
+        blocks.push(`${header}\nNo sets in the current data.`);
+      } else {
+        blocks.push(
+          [
+            header,
+            ...sets.map((a) =>
+              artistLineCompact(a, { hideStage: true, hideDay: Boolean(dayPinned) }),
+            ),
+          ].join("\n"),
+        );
+      }
+    }
+    return {
+      response: blocks.join("\n\n"),
+      resolvedStage: matched[0].stage_name,
+      resolvedDay: dayPinned ?? undefined,
+    };
+  }
+
+  const s = matched[0];
+  let sets = artists.filter((a) => a.stage === s.stage_name);
+  let dayContext = "";
   if (dayPinned) {
     sets = sets.filter((a) => a.day === dayPinned);
     dayContext = ` — ${dayPinned}`;
@@ -1423,12 +1667,21 @@ function nowPlayingStageRank(stageName: string): number {
   return idx === -1 ? 99 : idx;
 }
 
-export function handleNowPlaying(query: string = ""): string {
+export function handleNowPlaying(query: string = ""): {
+  response: string;
+  resolvedArtist?: string;
+  resolvedStage?: string;
+  resolvedDay?: FestivalDay;
+} {
   const { day, minutes } = getFestivalNow();
   if (!day) {
-    return "Nothing playing right now — not a festival day. Try \"who's on Festival Stage\" or \"any funk on Saturday\".";
+    return {
+      response:
+        "Nothing playing right now — not a festival day. Try \"who's on Festival Stage\" or \"any funk on Saturday\".",
+    };
   }
-  const stage = findStage(query);
+  const matchedStages = findStages(query);
+  const stage = matchedStages[0] ?? null;
   const onStage = (a: Artist) => !stage || a.stage === stage.stage_name;
   const label = stage ? `${stage.stage_name} now` : `Playing now (${day})`;
 
@@ -1446,19 +1699,38 @@ export function handleNowPlaying(query: string = ""): string {
       return a.stage.localeCompare(b.stage);
     });
   if (live.length > 0) {
-    // Single-stage, single-set → tight answer.
+    // Single-stage, single-set → tight answer + carry artist into context.
     if (stage && live.length === 1) {
       const a = live[0];
-      return [
-        a.artist_name,
-        `${formatTime(a.start_time)}–${formatTime(a.end_time)}`,
-        `${a.stage} · ${a.day}`,
-      ].join("\n");
+      return {
+        response: [
+          a.artist_name,
+          `${formatTime(a.start_time)}–${formatTime(a.end_time)}`,
+          `${a.stage} · ${a.day}`,
+        ].join("\n"),
+        resolvedArtist: a.artist_name,
+        resolvedStage: a.stage,
+        resolvedDay: a.day as FestivalDay,
+      };
     }
-    return [
-      `${label}:`,
-      ...live.map((a) => artistLineCompact(a, { hideDay: true, hideStage: Boolean(stage) })),
-    ].join("\n");
+    return {
+      response: [
+        `${label}:`,
+        ...live.map((a) =>
+          artistLineCompact(a, { hideDay: true, hideStage: Boolean(stage) }),
+        ),
+      ].join("\n"),
+      // Carry the single live artist on a stage-pinned query for follow-ups.
+      ...(stage && live.length === 1
+        ? {
+            resolvedArtist: live[0].artist_name,
+            resolvedStage: live[0].stage,
+            resolvedDay: live[0].day as FestivalDay,
+          }
+        : stage
+          ? { resolvedStage: stage.stage_name, resolvedDay: day }
+          : { resolvedDay: day }),
+    };
   }
 
   const upcoming = artists
@@ -1466,17 +1738,29 @@ export function handleNowPlaying(query: string = ""): string {
     .sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time))
     .slice(0, stage ? 3 : 4);
   if (upcoming.length === 0) {
-    return stage
-      ? `Nothing left on ${stage.stage_name} today (${day}).`
-      : `No sets left today (${day}).`;
+    return {
+      response: stage
+        ? `Nothing left on ${stage.stage_name} today (${day}).`
+        : `No sets left today (${day}).`,
+      resolvedStage: stage?.stage_name,
+      resolvedDay: day,
+    };
   }
   const header = stage
     ? `Nothing on ${stage.stage_name} right now. Up next there:`
     : `Nothing on stage at the minute. Up next on ${day}:`;
-  return [
-    header,
-    ...upcoming.map((a) => artistLineCompact(a, { hideDay: true, hideStage: Boolean(stage) })),
-  ].join("\n");
+  return {
+    response: [
+      header,
+      ...upcoming.map((a) =>
+        artistLineCompact(a, { hideDay: true, hideStage: Boolean(stage) }),
+      ),
+    ].join("\n"),
+    // First upcoming artist is the natural antecedent for "who is that?"
+    resolvedArtist: upcoming[0].artist_name,
+    resolvedStage: stage?.stage_name ?? upcoming[0].stage,
+    resolvedDay: day,
+  };
 }
 
 function hasPronoun(query: string): boolean {
@@ -1509,6 +1793,71 @@ export function handleNextOnStage(query: string, context?: AnswerContext): {
 } {
   const target = resolveArtist(query, context);
   if (!target) {
+    // "Who's playing next on Gentilly Stage?" — no artist named, but a stage
+    // is. Find what's on that stage right after now (or after whoever is
+    // currently live there).
+    const stageOnly = findStage(query) ?? (
+      context?.lastStage ? stages.find((s) => s.stage_name === context.lastStage) ?? null : null
+    );
+    if (stageOnly) {
+      const { day, minutes } = getFestivalNow();
+      const targetDay = day ?? context?.lastDay ?? null;
+      if (!targetDay) {
+        return {
+          response: `Not a festival day right now. Try "who's playing on ${stageOnly.stage_name} Saturday".`,
+        };
+      }
+      const onStage = artists
+        .filter((a) => a.stage === stageOnly.stage_name && a.day === targetDay)
+        .sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time));
+      if (onStage.length === 0) {
+        return {
+          response: `Nothing listed on ${stageOnly.stage_name} for ${targetDay}.`,
+          resolvedStage: stageOnly.stage_name,
+          resolvedDay: targetDay as FestivalDay,
+        };
+      }
+      // If a set is live right now, "next" means the one after it.
+      const liveIdx = day === targetDay
+        ? onStage.findIndex(
+            (a) =>
+              toMinutes(a.start_time) <= minutes && toMinutes(a.end_time) > minutes,
+          )
+        : -1;
+      let next: Artist | null = null;
+      let live: Artist | null = null;
+      if (liveIdx >= 0) {
+        live = onStage[liveIdx];
+        next = onStage[liveIdx + 1] ?? null;
+      } else if (day === targetDay) {
+        next = onStage.find((a) => toMinutes(a.start_time) > minutes) ?? null;
+      } else {
+        next = onStage[0];
+      }
+      if (!next) {
+        const tail = live
+          ? `${live.artist_name} is the last set on ${stageOnly.stage_name} for ${targetDay}.`
+          : `Nothing else on ${stageOnly.stage_name} for ${targetDay}.`;
+        return {
+          response: tail,
+          resolvedArtist: live?.artist_name,
+          resolvedStage: stageOnly.stage_name,
+          resolvedDay: targetDay as FestivalDay,
+        };
+      }
+      const lead = live
+        ? `After ${live.artist_name} on ${stageOnly.stage_name} (${targetDay}):`
+        : `Next on ${stageOnly.stage_name} (${targetDay}):`;
+      return {
+        response: [
+          lead,
+          `${next.artist_name} — ${formatTime(next.start_time)}–${formatTime(next.end_time)}`,
+        ].join("\n"),
+        resolvedArtist: next.artist_name,
+        resolvedStage: next.stage,
+        resolvedDay: next.day as FestivalDay,
+      };
+    }
     if (hasPronoun(query)) {
       return { response: "I don't know who you mean by that yet. Ask about a specific artist first, then follow up with \"who is after them?\"." };
     }
@@ -2264,6 +2613,7 @@ const SURPRISE_CATEGORY_PROMPT = [
 export function handleSurpriseMe(query: string): {
   response: string;
   pending?: PendingDisambiguation;
+  resolvedSurpriseCategory?: SurpriseCategory;
 } {
   const cat = detectSurpriseCategory(norm(query));
   if (!cat) {
@@ -2272,10 +2622,22 @@ export function handleSurpriseMe(query: string): {
       pending: { kind: "surprise" },
     };
   }
-  if (cat === "food") return { response: surpriseFood() };
-  if (cat === "music") return { response: surpriseMusic() };
-  return { response: surpriseCulture() };
+  if (cat === "food") return { response: surpriseFood(), resolvedSurpriseCategory: cat };
+  if (cat === "music") return { response: surpriseMusic(), resolvedSurpriseCategory: cat };
+  return { response: surpriseCulture(), resolvedSurpriseCategory: cat };
 }
+
+// Run a surprise for an explicit category — used by the re-roll flow when
+// the user says "give me something else" after an earlier surprise.
+function runSurpriseForCategory(cat: SurpriseCategory): string {
+  if (cat === "food") return surpriseFood();
+  if (cat === "music") return surpriseMusic();
+  return surpriseCulture();
+}
+
+// Phrases that signal "re-roll this surprise" — same category, different pick.
+const SURPRISE_REROLL_RE =
+  /^(give\s+me\s+(something|another)(\s+(else|different|new))?|(something|anything)\s+(else|different|new)|another(\s+one)?|different(\s+one)?|again|one\s+more|next\s+one|try\s+again|not\s+(that|it)|else)\s*\??$/;
 
 export function handleFoodRecommendations(): string {
   const lines: string[] = ["Must-try Jazz Fest food:"];
@@ -2511,7 +2873,7 @@ function resolveConversationalFollowUp(
 
   if (FOLLOWUP_ELSE_PLAYING_RE.test(q)) {
     // No subject required — answer "what else is on right now" generically.
-    return { intent: "now_playing", response: handleNowPlaying("") };
+    return { intent: "now_playing", ...handleNowPlaying("") };
   }
 
   if (FOLLOWUP_FOOD_INTENT_RE.test(q)) {
@@ -2533,6 +2895,13 @@ function mergeContext(
   if (result.resolvedStage) ctx.lastStage = result.resolvedStage;
   if (result.resolvedDay) ctx.lastDay = result.resolvedDay;
   if (result.resolvedTime) ctx.lastTime = result.resolvedTime;
+  if (result.resolvedSurpriseCategory) {
+    ctx.lastSurpriseCategory = result.resolvedSurpriseCategory;
+  } else if (result.intent !== "surprise_me" && result.intent !== "unknown") {
+    // Drop stale category once the user moves on to a different intent so a
+    // later "give me something else" doesn't accidentally re-roll a surprise.
+    delete ctx.lastSurpriseCategory;
+  }
   // Pending state — only carry forward when explicitly returned this turn.
   if (result.pending) {
     ctx.pending = result.pending;
@@ -2629,6 +2998,22 @@ function routeAnswer(query: string, context?: AnswerContext): AnswerResult {
     // fresh query so the user isn't stuck.
   }
 
+  // SURPRISE RE-ROLL — after a surprise, "give me something else" / "another"
+  // / "something different" should re-pick within the same category. Only
+  // fires when the previous turn was a surprise with a known category.
+  if (
+    context?.lastIntent === "surprise_me" &&
+    context.lastSurpriseCategory &&
+    SURPRISE_REROLL_RE.test(norm(trimmed))
+  ) {
+    const cat = context.lastSurpriseCategory;
+    return {
+      intent: "surprise_me",
+      response: runSurpriseForCategory(cat),
+      resolvedSurpriseCategory: cat,
+    };
+  }
+
   // Resolve a pending day-disambiguation from the previous turn.
   if (context?.pending?.kind === "day") {
     const { pending: _p, ...rest } = context;
@@ -2668,7 +3053,7 @@ function routeAnswer(query: string, context?: AnswerContext): AnswerResult {
   const intent = classify(trimmed);
   switch (intent) {
     case "now_playing":
-      return { intent, response: handleNowPlaying(trimmed) };
+      return { intent, ...handleNowPlaying(trimmed) };
     case "stage_lookup":
       return { intent, ...handleStageLookup(trimmed, context) };
     case "artist_bio":

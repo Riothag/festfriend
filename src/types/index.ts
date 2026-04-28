@@ -92,6 +92,10 @@ export interface AnswerContext {
   // The previous turn's intent. Lets the bot reason about flow — e.g. shift
   // from music to "what about food?".
   lastIntent?: Intent;
+  // The category of the most recent surprise. Powers "give me something else"
+  // / "another" / "different one" follow-ups so a re-roll stays in the same
+  // category (food / music / culture) without re-prompting.
+  lastSurpriseCategory?: "food" | "music" | "culture";
   // If the previous turn asked a follow-up ("which day?"), this carries
   // the options and original query so a short reply like "23" / "first" / "music" resolves.
   pending?: PendingDisambiguation;
@@ -106,6 +110,9 @@ export interface AnswerResult {
   resolvedStage?: string;
   resolvedDay?: FestivalDay;
   resolvedTime?: string;
+  // The category picked by a surprise_me turn — carried into context so a
+  // follow-up "give me something else" re-rolls the same flavor.
+  resolvedSurpriseCategory?: "food" | "music" | "culture";
   // If the handler asked a follow-up question, client stashes this and sends
   // it back on the next turn as context.pending.
   pending?: PendingDisambiguation;
